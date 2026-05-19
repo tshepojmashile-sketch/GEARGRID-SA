@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block content %}
+<form method="post" id="quote-form">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <input name="client_name" placeholder="Client Name" required>
+  <br><br>
+  <h2 class="title" style="margin-top:0;font-size:1.1rem">Owned equipment</h2>
+  {% if items %}
+    <table id="quote-owned-table">
+      <tr>
+        <th>Equipment / Description</th>
+        <th>Unit Price</th>
+        <th>Quantity</th>
+        <th>Days</th>
+      </tr>
+      {% for item in items %}
+      <tr class="js-quote-line" data-unit-price="{{ (item['price'] or 0)|int }}">
+        <td data-label="Equipment / Description">{{ item["name"] }}</td>
+        <td data-label="Unit Price">R{{ item["price"] or 0 }}</td>
+        <td data-label="Units (max {{ item['qty_available'] }})"><input type="number" min="0" max="{{ item['qty_available'] }}" class="js-qty" name="qty_{{ item['id'] }}" value="0"></td>
+        <td data-label="Days"><input type="number" min="1" class="js-days" name="days_{{ item['id'] }}" value="1"></td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="meta">No owned equipment with available units to quote.</p>
+  {% endif %}
+
+  <h2 class="title" style="margin-top:24px;font-size:1.1rem">Sub-rented items</h2>
+  {% if sub_rentals %}
+    <table id="quote-sub-table">
+      <tr>
+        <th>Description</th>
+        <th>Supplier</th>
+        <th>Available</th>
+        <th>Cost / unit</th>
+        <th>Quantity</th>
+        <th>Days</th>
+        <th>Show on client quote</th>
+      </tr>
+      {% for sr in sub_rentals %}
+      <tr class="js-quote-line" data-unit-price="{{ (sr['cost_per_unit'] or 0)|int }}">
+        <td data-label="Description">{{ sr["equipment_description"] }}</td>
+        <td data-label="Supplier">{{ sr["supplier_name"] }}</td>
+        <td data-label="Available">{{ sr["quantity_available"] }}</td>
+        <td data-label="Cost">R{{ sr["cost_per_unit"] or 0 }}</td>
+        <td data-label="Quantity"><input type="number" min="0" max="{{ sr['quantity_available'] }}" class="js-qty" name="sub_qty_{{ sr['id'] }}" value="0"></td>
+        <td data-label="Days"><input type="number" min="1" class="js-days" name="sub_days_{{ sr['id'] }}" value="1"></td>
+        <td data-label="Show on client quote">
+          <select name="sub_show_{{ sr['id'] }}">
+            <option value="0" selected>No</option>
+            <option value="1">Yes</option>
+          </select>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p class="meta">No sub-rented stock with available units. Add items on <a href="/sub-rentals">Sub-Rentals</a>.</p>
+  {% endif %}
+
+  {% if items or sub_rentals %}
+    <h2 class="title" style="margin-top:24px;font-size:1.1rem">Totals</h2>
+    <p class="meta">Subtotal updates as you enter quantities (final amounts are calculated on the server when you submit).</p>
+    <p><strong>Subtotal:</strong> R<span id="quote-subtotal-val">0</span></p>
+    <p>
+      <label for="discount_percent">Discount %</label><br>
+      <input id="discount_percent" name="discount_percent" type="number" min="0" max="100" step="0.01" value="{{ company.get('default_discount_percent', 0) }}">
+    </p>
+    <p><strong>Discount amount:</strong> <span style="color:#b91c1c">R<span id="quote-discount-amt">0</span></span></p>
+    <p>
+      <label><input type="checkbox" name="vat_on" value="1" id="vat_on" {% if company.get('vat_enabled') %}checked{% endif %}> Apply VAT</label>
+      <span class="meta">(company rate: {{ company.get('vat_percent', 15) }}%)</span>
+    </p>
+    <p><strong>VAT amount:</strong> R<span id="quote-vat-amt">0</span></p>
+    <p><strong>Grand total:</strong> R<span id="quote-grand-val">0</span></p>
+    <br>
+    <button class="btn purple" type="submit">Create Quote</button>
+  {% else %}
+    <p>No equipment or sub-rentals available to quote.</p>
+  {% endif %}
+</form>
+<p><a href="/">Back</a></p>
+<script>
+(function () {
+  var form = document.getElementById("quote-form");
+  if (!form) return;
+  var vatRate = {{ (company.get('vat_percent') or 15)|float }};
+  function recalc() {
+    var sub = 0;
+    form.querySelectorAll("tr.js-quote-line").forEach(function (row) {
+      var price = parseInt(row.getAttribute("data-unit-price") || "0", 10) || 0;
+      var q = row.querySelector(".js-qty");
+      var d = row.querySelector(".js-days");
+      var qty = q ? (parseInt(q.value, 10) || 0) : 0;
+      var days = d ? (parseInt(d.value, 10) || 0) : 0;
+      if (days < 1) days = 1;
+      sub += qty * price * days;
+    });
+    var discPct = parseFloat((document.getElementById("discount_percent") || {}).value || "0");
+    if (isNaN(discPct) || discPct < 0) discPct = 0;
+    if (discPct > 100) discPct = 100;
+    var discAmt = Math.round(sub * discPct / 100);
+    var after = Math.max(0, sub - discAmt);
+    var vatOn = document.getElementById("vat_on") && document.getElementById("vat_on").checked;
+    var vatAmt = vatOn ? Math.round(after * vatRate / 100) : 0;
+    var grand = after + vatAmt;
+    var el = function (id) { return document.getElementById(id); };
+    if (el("quote-subtotal-val")) el("quote-subtotal-val").textContent = String(sub);
+    if (el("quote-discount-amt")) el("quote-discount-amt").textContent = String(discAmt);
+    if (el("quote-vat-amt")) el("quote-vat-amt").textContent = String(vatAmt);
+    if (el("quote-grand-val")) el("quote-grand-val").textContent = String(grand);
+  }
+  form.addEventListener("input", recalc);
+  form.addEventListener("change", recalc);
+  recalc();
+})();
+</script>
+{% endblock %}

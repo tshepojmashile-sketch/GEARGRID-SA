@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get("error") %}
+  <p class="error">{{ request.query_params.get("error") }}</p>
+{% endif %}
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <input name="name" value="{{ item['name'] }}" required>
+  <input name="quantity" type="number" min="1" value="{{ item['quantity']|default(1, true) }}" required>
+  <input name="price" type="number" min="0" value="{{ item['price'] or 0 }}" required>
+  <button class="btn blue" type="submit">Save</button>
+</form>
+<p><a href="/">Back</a></p>
+{% endblock %}

@@ -1,0 +1,6 @@
+rental.db
+__pycache__/
+.venv/
+*.pyc
+.env
+static/logos/

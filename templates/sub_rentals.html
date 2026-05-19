@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+
+<section class="subrentals-section" aria-labelledby="subrentals-add-heading">
+  <h2 class="title" id="subrentals-add-heading" style="margin-top:0">Add New Sub-Rental Item</h2>
+  <form method="post" action="/sub-rentals" class="subrentals-add-form">
+    <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+    <div class="form-row-group">
+      <label>Supplier Name<br><input name="supplier_name" required></label>
+      <label>Equipment Description<br><input name="equipment_description" required></label>
+    </div>
+    <div class="form-row-group">
+      <label>Total Units<br><input name="quantity_total" type="number" min="1" value="1" required></label>
+      <label>Cost Per Unit (R)<br><input name="cost_per_unit" type="number" min="0" value="0"></label>
+    </div>
+    <label>Notes<br><textarea name="notes" rows="2"></textarea></label>
+    <p><button type="submit" class="btn blue">Add item</button></p>
+  </form>
+</section>
+
+<section class="subrentals-section" aria-labelledby="subrentals-stock-heading" style="margin-top:28px">
+  <h2 class="title" id="subrentals-stock-heading">Current Sub-Rental Stock</h2>
+  <table class="quote-dash-table">
+    <thead>
+      <tr>
+        <th>Supplier</th>
+        <th>Description</th>
+        <th>Total</th>
+        <th>Available</th>
+        <th>In use</th>
+        <th>Cost / unit</th>
+        <th>Notes</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      {% set qtot = (r['quantity_total'] or 0)|int %}
+      {% set qavail = (r['quantity_available'] or 0)|int %}
+      {% set in_use = qtot - qavail if qtot >= qavail else 0 %}
+      <tr>
+        <td data-label="Supplier">{{ r["supplier_name"] }}</td>
+        <td data-label="Description">{{ r["equipment_description"] }}</td>
+        <td data-label="Total">{{ qtot }}</td>
+        <td data-label="Available">{{ qavail }}</td>
+        <td data-label="In use">{{ in_use }}</td>
+        <td data-label="Cost">R{{ r["cost_per_unit"] or 0 }}</td>
+        <td data-label="Notes">{{ r["notes"] or "—" }}</td>
+        <td data-label="Actions">
+          <a class="btn btn-sm btn-secondary-outline" href="/sub-rentals/{{ r['id'] }}/edit">Edit</a>
+          <form method="post" action="/sub-rentals/{{ r['id'] }}/delete" class="inline-form" style="display:inline-block;margin-left:6px" onsubmit="return confirm('Delete this sub-rental item?');">
+            <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+            <button type="submit" class="btn btn-sm btn-danger-outline">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="8">No sub-rental items yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<p class="meta" style="margin-top:20px"><a href="/">Back to dashboard</a></p>
+{% endblock %}

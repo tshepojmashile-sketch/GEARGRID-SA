@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="meta" style="margin-top:0;margin-bottom:16px">All invoices for your company. Click a row to view details, record payments, or download a PDF.</p>
+
+<table class="quote-dash-table invoice-table">
+  <thead>
+    <tr>
+      <th>Invoice #</th>
+      <th>Client</th>
+      <th>Created</th>
+      <th>Due</th>
+      <th>Total</th>
+      <th>Paid</th>
+      <th>Balance</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for inv in invoices %}
+    <tr class="invoice-table__row {% if inv.overdue %}invoice-table__row--overdue{% endif %}" onclick="window.location.href='/invoices/{{ inv['id'] }}'" role="link" tabindex="0" onkeydown="if(event.key==='Enter')window.location.href='/invoices/{{ inv['id'] }}'">
+      <td data-label="Invoice #"><strong>{{ inv["invoice_number"] }}</strong></td>
+      <td data-label="Client">{{ inv["client_name"] }}</td>
+      <td data-label="Created">{{ (inv["created_at"] or "")[:19]|replace("T", " ") }}</td>
+      <td data-label="Due">{{ inv["due_date"] or "—" }}</td>
+      <td data-label="Total">R{{ inv["total"] }}</td>
+      <td data-label="Paid">R{{ inv["amount_paid"] }}</td>
+      <td data-label="Balance">R{{ inv["remaining"] }}</td>
+      <td data-label="Status">
+        {% if inv.payment_status_norm == "paid" %}
+          <span class="status-badge status-badge--inv-paid">paid</span>
+        {% elif inv.payment_status_norm == "partial" %}
+          <span class="status-badge status-badge--inv-partial">partial</span>
+        {% else %}
+          <span class="status-badge status-badge--inv-unpaid">unpaid</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="8">No invoices yet. Approve a quote from the <a href="/quotes/dashboard">Quote Dashboard</a> to create one.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

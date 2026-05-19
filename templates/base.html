@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }} - AVMAN</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  {% if current_user %}
+  {% set path = request.url.path %}
+  <header class="site-header">
+    <div class="header-top">
+      <div class="header-brand">
+        {% if current_user.get("has_company_logo") %}
+        <div style="display:flex;align-items:center;gap:10px;width:100%;min-width:0;">
+          <img src="/static/logos/company_{{ current_user['company_id'] }}.png" alt="" style="max-height:35px;width:auto;flex-shrink:0;align-self:center;">
+          <span class="company-name">{{ current_user["company_name"] or current_user["company_record_name"] }}</span>
+        </div>
+        {% else %}
+        <span class="company-name">{{ current_user["company_name"] or current_user["company_record_name"] }}</span>
+        {% endif %}
+        <span class="user-meta">{{ current_user["full_name"] }} · {{ current_user["role"]|upper }}</span>
+      </div>
+      <form method="post" action="/logout" class="header-logout">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <button type="submit" class="btn-logout">Logout</button>
+      </form>
+    </div>
+    <nav class="main-nav" aria-label="Main">
+      <div class="main-nav-inner">
+      <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" tabindex="-1">
+      <label for="nav-toggle" class="hamburger" aria-label="Open menu" role="button"></label>
+      <div class="nav-panel">
+        <div class="nav-links">
+          {% if current_user["role"] in ["admin", "management"] %}
+          <div class="nav-group">
+            <a class="nav-link {% if path == '/' %}active{% endif %}" href="/">Dashboard</a>
+            <a class="nav-link {% if path == '/add' %}active{% endif %}" href="/add">Add Equipment</a>
+            <a class="nav-link {% if path == '/clients' %}active{% endif %}" href="/clients">Clients</a>
+          </div>
+          <span class="nav-sep" aria-hidden="true"></span>
+          <div class="nav-group">
+            <a class="nav-link {% if path == '/quote' %}active{% endif %}" href="/quote">Create Quote</a>
+            <a class="nav-link {% if path == '/quotes/dashboard' %}active{% endif %}" href="/quotes/dashboard">Quote Dashboard</a>
+            <a class="nav-link {% if path == '/invoices' or path.startswith('/invoices/') %}active{% endif %}" href="/invoices">Invoices</a>
+            <a class="nav-link {% if path == '/jobs' %}active{% endif %}" href="/jobs">Jobs</a>
+            <a class="nav-link {% if path == '/sub-rentals' or path.startswith('/sub-rentals/') %}active{% endif %}" href="/sub-rentals">Sub-Rentals</a>
+          </div>
+          {% else %}
+          <div class="nav-group">
+            <a class="nav-link {% if path == '/warehouse' or path.startswith('/warehouse/') %}active{% endif %}" href="/warehouse">Warehouse</a>
+          </div>
+          {% endif %}
+          {% if current_user["role"] == "admin" %}
+          <span class="nav-sep" aria-hidden="true"></span>
+          <div class="nav-group nav-group-admin">
+            <a class="nav-link {% if path == '/users' %}active{% endif %}" href="/users">Users</a>
+            <a class="nav-link {% if path == '/settings' %}active{% endif %}" href="/settings">Company Settings</a>
+            <a class="nav-link {% if path == '/billing' %}active{% endif %}" href="/billing">Billing</a>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      </div>
+    </nav>
+  </header>
+  {% endif %}
+
+  <main class="main-content">
+    <div class="content-card">
+      <h1 class="page-title">{{ title }}</h1>
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+</body>
+</html>

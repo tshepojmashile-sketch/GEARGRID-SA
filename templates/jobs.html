@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get("error") %}
+  <p class="error">{{ request.query_params.get("error") }}</p>
+{% endif %}
+
+<table class="quote-dash-table">
+  <thead>
+    <tr>
+      <th>Job</th>
+      <th>Client</th>
+      <th>Job date</th>
+      <th>Quote</th>
+      <th>Status</th>
+      <th>Update</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for j in jobs %}
+    <tr>
+      <td data-label="Job">#{{ j["id"] }}</td>
+      <td data-label="Client">{{ j["client_name"] }}</td>
+      <td data-label="Job date">{{ j["job_date"] }}</td>
+      <td data-label="Quote">{{ j["quote_number"] or "—" }}</td>
+      <td data-label="Status">
+        {% if j["status"] == "upcoming" %}
+          <span class="status-badge status-badge--job-upcoming">upcoming</span>
+        {% elif j["status"] == "active" %}
+          <span class="status-badge status-badge--job-active">active</span>
+        {% elif j["status"] == "done" %}
+          <span class="status-badge status-badge--job-done">done</span>
+        {% else %}
+          <span class="meta">{{ j["status"] }}</span>
+        {% endif %}
+      </td>
+      <td data-label="Update">
+        <form method="post" action="/jobs/{{ j['id'] }}/status" class="inline-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+          <input type="hidden" name="redirect_to" value="/jobs">
+          <select name="job_status" aria-label="Job status for job {{ j['id'] }}">
+            {% for s in job_statuses %}
+            <option value="{{ s }}" {% if j["status"] == s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-sm btn-primary-outline">Save</button>
+        </form>
+        <a class="btn btn-sm btn-secondary-outline" href="/warehouse/job/{{ j['id'] }}">Prep sheet</a>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No jobs yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

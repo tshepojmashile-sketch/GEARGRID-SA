@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<p><strong>Equipment:</strong> {{ equipment["name"] }}</p>
+<p class="meta">Available units: <strong>{{ qty_available }}</strong></p>
+<form method="post">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <label for="units">Units to rent</label>
+  <input id="units" name="units" type="number" min="1" max="{{ qty_available }}" value="1" required>
+  <select name="client" required>
+    {% for client in clients %}
+      <option>{{ client["name"] }}</option>
+    {% endfor %}
+  </select>
+  <input name="due_date" placeholder="YYYY-MM-DD" required>
+  <button class="btn green" type="submit">Rent</button>
+</form>
+<p><a href="/">Back</a></p>
+{% endblock %}

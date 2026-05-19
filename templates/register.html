@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get("error") %}
+  <p class="error">{{ request.query_params.get("error") }}</p>
+{% endif %}
+<form method="post">
+  <input name="company_name" placeholder="Company Name" required>
+  <input name="full_name" placeholder="Your Full Name" required>
+  <input type="email" name="email" placeholder="Email" required>
+  <input type="password" name="password" placeholder="Password (min 6 chars)" required>
+  <button class="btn blue" type="submit">Create Account</button>
+</form>
+<p>Already have an account? <a href="/login">Login</a></p>
+{% endblock %}

@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="dashboard-tabs" data-dashboard-tabs>
+  <div class="dashboard-tabs__bar" role="tablist" aria-label="Dashboard sections">
+    <button type="button" class="dashboard-tabs__btn dashboard-tabs__btn--active" role="tab" aria-selected="true" aria-controls="panel-equipment" id="tab-equipment" data-tab="equipment">Equipment</button>
+    <button type="button" class="dashboard-tabs__btn" role="tab" aria-selected="false" aria-controls="panel-history" id="tab-history" data-tab="history">History</button>
+  </div>
+
+  <div class="dashboard-tabs__panel" id="panel-equipment" role="tabpanel" aria-labelledby="tab-equipment">
+    <div class="stock-summary" aria-label="Stock overview">
+      <a href="/" class="stock-summary__item stock-summary__item--neutral {% if stock_filter == 'all' %}stock-summary__item--active{% endif %}">
+        <span class="stock-summary__label">Total units</span>
+        <span class="stock-summary__value">{{ total_count }}</span>
+      </a>
+      <a href="/?stock=available" class="stock-summary__item stock-summary__item--available {% if stock_filter == 'available' %}stock-summary__item--active{% endif %}">
+        <span class="stock-summary__label">Available</span>
+        <span class="stock-summary__value">{{ available_count }}</span>
+      </a>
+      <a href="/?stock=rented" class="stock-summary__item stock-summary__item--rented {% if stock_filter == 'rented' %}stock-summary__item--active{% endif %}">
+        <span class="stock-summary__label">Rented out</span>
+        <span class="stock-summary__value">{{ rented_count }}</span>
+      </a>
+      <a href="/?stock=overdue" class="stock-summary__item stock-summary__item--overdue {% if stock_filter == 'overdue' %}stock-summary__item--active{% endif %}">
+        <span class="stock-summary__label">Overdue units</span>
+        <span class="stock-summary__value">{{ overdue_count }}</span>
+      </a>
+    </div>
+
+    {% if not items %}
+      <p class="empty-state">No equipment in this view{% if stock_filter != 'all' %}. <a href="/">Show all</a>{% else %}. Add your first item.{% endif %}</p>
+    {% endif %}
+
+    <div class="equipment-grid">
+    {% for item in items %}
+      {% set qtot = (item['quantity'] or 1)|int %}
+      {% set qrent = (item['quantity_rented'] or 0)|int %}
+      {% set diff = qtot - qrent %}
+      {% set qavail = diff if diff > 0 else 0 %}
+      {% set is_overdue = qrent > 0 and item["due_date"] and item["due_date"] < today %}
+      {% if is_overdue %}
+        {% set badge_class = "badge badge-danger" %}
+        {% set badge_label = "Overdue" %}
+      {% elif qrent > 0 %}
+        {% set badge_class = "badge badge-rented" %}
+        {% set badge_label = "Rented" %}
+      {% else %}
+        {% set badge_class = "badge badge-available" %}
+        {% set badge_label = "Available" %}
+      {% endif %}
+      <article class="equipment-card {% if is_overdue %}equipment-card--overdue{% endif %}">
+        <div class="equipment-card__body">
+          <div class="equipment-card__header-row">
+            <h2 class="equipment-card__title">{{ item["name"] }}</h2>
+            <span class="{{ badge_class }}">{{ badge_label }}</span>
+          </div>
+          <p class="equipment-card__price">R{{ item["price"] or 0 }} <span class="equipment-card__price-label">per unit</span></p>
+          <div class="equipment-card__meta">
+            <div class="equipment-card__meta-row">
+              <span class="equipment-card__meta-label">Total units</span>
+              <span class="equipment-card__meta-value">{{ qtot }}</span>
+            </div>
+            <div class="equipment-card__meta-row">
+              <span class="equipment-card__meta-label">Available</span>
+              <span class="equipment-card__meta-value equipment-card__qty-available">{{ qavail }}</span>
+            </div>
+            <div class="equipment-card__meta-row">
+              <span class="equipment-card__meta-label">Rented out</span>
+              <span class="equipment-card__meta-value equipment-card__qty-rented">{{ qrent }}</span>
+            </div>
+            <div class="equipment-card__meta-row">
+              <span class="equipment-card__meta-label">Client</span>
+              <span class="equipment-card__meta-value">{{ item["rented_to"] or "—" }}</span>
+            </div>
+            <div class="equipment-card__meta-row">
+              <span class="equipment-card__meta-label">Due</span>
+              <span class="equipment-card__meta-value">{{ item["due_date"] or "—" }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="equipment-card__actions">
+          <button type="button" class="btn btn-sm btn-secondary-outline js-dashboard-view-history" data-equipment-name="{{ item['name']|e }}">View History</button>
+          {% if qavail > 0 %}
+          <a class="btn btn-sm btn-primary-outline" href="/rent/{{ item['id'] }}">Rent</a>
+          {% endif %}
+          {% if qrent > 0 %}
+          <a class="btn btn-sm btn-secondary-outline" href="/return/{{ item['id'] }}">Return</a>
+          {% endif %}
+          <a class="btn btn-sm btn-secondary-outline" href="/equipment/{{ item['id'] }}/edit">Edit</a>
+          {% if current_user["role"] == "admin" %}
+            <form method="post" action="/equipment/{{ item['id'] }}/delete" class="equipment-card__delete-form">
+              <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+              <button class="btn btn-sm btn-danger-outline" type="submit">Delete</button>
+            </form>
+          {% endif %}
+        </div>
+      </article>
+    {% endfor %}
+    </div>
+
+    {% if current_user["role"] in ["admin", "management"] %}
+    <section class="dashboard-subrentals" aria-labelledby="dash-subrentals-title">
+      <h2 class="dashboard-subrentals__title" id="dash-subrentals-title">Sub-Rented Equipment</h2>
+      <p class="dashboard-subrentals__subtitle">Equipment sourced from external suppliers</p>
+      {% if sub_rentals %}
+      <div class="equipment-grid">
+        {% for sr in sub_rentals %}
+        {% set qtot = (sr['quantity_total'] or 0)|int %}
+        {% set qavail = (sr['quantity_available'] or 0)|int %}
+        {% set in_use = qtot - qavail if qtot >= qavail else 0 %}
+        <article class="equipment-card equipment-card--subrental">
+          <div class="equipment-card__body">
+            <div class="equipment-card__header-row">
+              <h2 class="equipment-card__title">{{ sr["equipment_description"] }}</h2>
+              <span class="badge badge-rented">Sub-rental</span>
+            </div>
+            <p class="equipment-card__price">R{{ sr["cost_per_unit"] or 0 }} <span class="equipment-card__price-label">per unit</span></p>
+            <p class="subrental-supplier-line">Supplier: <strong>{{ sr["supplier_name"] }}</strong></p>
+            <div class="equipment-card__meta">
+              <div class="equipment-card__meta-row">
+                <span class="equipment-card__meta-label">Total units</span>
+                <span class="equipment-card__meta-value">{{ qtot }}</span>
+              </div>
+              <div class="equipment-card__meta-row">
+                <span class="equipment-card__meta-label">Available</span>
+                <span class="equipment-card__meta-value equipment-card__qty-available">{{ qavail }}</span>
+              </div>
+              <div class="equipment-card__meta-row">
+                <span class="equipment-card__meta-label">In use</span>
+                <span class="equipment-card__meta-value equipment-card__qty-rented">{{ in_use }}</span>
+              </div>
+            </div>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p class="dashboard-subrentals__empty">No sub-rented equipment added yet</p>
+      {% endif %}
+    </section>
+    {% endif %}
+  </div>
+
+  <div class="dashboard-tabs__panel" id="panel-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+    <div class="dashboard-history-toolbar">
+      <p class="dashboard-history-filter-note" id="history-filter-note" hidden>Showing rentals for <strong id="history-filter-name"></strong>.</p>
+      <button type="button" class="btn btn-sm btn-secondary-outline" id="history-show-all" hidden>Show all</button>
+    </div>
+    <table class="quote-dash-table dashboard-history-table">
+      <thead>
+        <tr>
+          <th>Equipment name</th>
+          <th>Client</th>
+          <th>Units rented</th>
+          <th>Date rented</th>
+          <th>Date returned</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in history_rows %}
+        <tr class="js-history-row" data-equipment-name="{{ (row.get('equipment_name') or '')|e }}">
+          <td data-label="Equipment name">{{ row.get("equipment_name") or "—" }}</td>
+          <td data-label="Client">{{ row.get("client") or "—" }}</td>
+          <td data-label="Units rented">{{ row.get("units") or 1 }}</td>
+          <td data-label="Date rented">{{ row.get("date_rented") or "—" }}</td>
+          <td data-label="Date returned">{{ row.get("date_returned") or "—" }}</td>
+          <td data-label="Status">
+            {% if row.get("date_returned") %}
+              <span class="status-badge status-badge--inv-paid">Returned</span>
+            {% else %}
+              <span class="status-badge status-badge--inv-partial">Out</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="6">No rental history yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="dashboard-history-empty-filter" id="history-empty-filter" hidden>No matching rental history for this equipment.</p>
+  </div>
+</div>
+<script>
+(function () {
+  var root = document.querySelector("[data-dashboard-tabs]");
+  if (!root) return;
+  var tabEquipment = document.getElementById("tab-equipment");
+  var tabHistory = document.getElementById("tab-history");
+  var panelEquipment = document.getElementById("panel-equipment");
+  var panelHistory = document.getElementById("panel-history");
+  var filterNote = document.getElementById("history-filter-note");
+  var filterNameEl = document.getElementById("history-filter-name");
+  var showAllBtn = document.getElementById("history-show-all");
+  var emptyFilterMsg = document.getElementById("history-empty-filter");
+  var rows = root.querySelectorAll(".js-history-row");
+  var currentFilter = "";
+
+  function setTab(tab) {
+    var isHistory = tab === "history";
+    panelEquipment.hidden = isHistory;
+    panelHistory.hidden = !isHistory;
+    tabEquipment.setAttribute("aria-selected", isHistory ? "false" : "true");
+    tabHistory.setAttribute("aria-selected", isHistory ? "true" : "false");
+    tabEquipment.classList.toggle("dashboard-tabs__btn--active", !isHistory);
+    tabHistory.classList.toggle("dashboard-tabs__btn--active", isHistory);
+  }
+
+  function applyHistoryFilter(name) {
+    currentFilter = name || "";
+    var visible = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var en = row.getAttribute("data-equipment-name") || "";
+      var show = !currentFilter || en === currentFilter;
+      row.hidden = !show;
+      if (show) visible++;
+    }
+    if (currentFilter) {
+      filterNameEl.textContent = currentFilter;
+      filterNote.hidden = false;
+      showAllBtn.hidden = false;
+      emptyFilterMsg.hidden = visible > 0;
+    } else {
+      filterNote.hidden = true;
+      showAllBtn.hidden = true;
+      emptyFilterMsg.hidden = true;
+    }
+  }
+
+  tabEquipment.addEventListener("click", function () {
+    setTab("equipment");
+    if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search);
+    else window.location.hash = "";
+  });
+  tabHistory.addEventListener("click", function () {
+    setTab("history");
+    if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search + "#history");
+    else window.location.hash = "history";
+  });
+  showAllBtn.addEventListener("click", function () {
+    applyHistoryFilter("");
+    if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search + "#history");
+  });
+  root.querySelectorAll(".js-dashboard-view-history").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var n = btn.getAttribute("data-equipment-name") || "";
+      setTab("history");
+      applyHistoryFilter(n);
+      if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search + "#history");
+      else window.location.hash = "history";
+      panelHistory.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+  if (window.location.hash === "#history") {
+    setTab("history");
+  }
+})();
+</script>
+{% endblock %}

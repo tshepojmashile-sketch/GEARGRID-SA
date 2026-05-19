@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get("error") %}
+  <p class="error">{{ request.query_params.get("error") }}</p>
+{% endif %}
+{% if request.query_params.get("saved") %}
+  <p>Saved successfully.</p>
+{% endif %}
+{% if temp_password %}
+  <p class="notice">Temporary password (show once): <strong>{{ temp_password }}</strong></p>
+{% endif %}
+
+<h3>Add User</h3>
+<form method="post" action="/users">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <input name="full_name" placeholder="Full name" required>
+  <input type="email" name="email" placeholder="Email" required>
+  <input type="password" name="password" placeholder="Password (min 6 chars)" required>
+  <select name="role" required>
+    {% for role in roles %}
+      <option value="{{ role }}">{{ role }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn blue" type="submit">Add User</button>
+</form>
+
+<h3>Company Users</h3>
+<table>
+  <tr>
+    <th>Name</th>
+    <th>Email</th>
+    <th>Role</th>
+    <th>Created</th>
+    <th>Actions</th>
+  </tr>
+  {% for u in users %}
+  <tr>
+    <td data-label="Name">{{ u["full_name"] }}</td>
+    <td data-label="Email">{{ u["email"] }}</td>
+    <td data-label="Role">{{ u["role"] }}</td>
+    <td data-label="Created">{{ u["created_at"][:10] }}</td>
+    <td data-label="Actions">
+      <form method="post" action="/users/{{ u['id'] }}/role" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <select name="role">
+          {% for role in roles %}
+            <option value="{{ role }}" {% if role == u["role"] %}selected{% endif %}>{{ role }}</option>
+          {% endfor %}
+        </select>
+        <button class="btn dark" type="submit">Update Role</button>
+      </form>
+      {% if u["id"] != current_user["user_id"] %}
+      <form method="post" action="/users/{{ u['id'] }}/reset-password" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <button class="btn orange" type="submit">Reset Password</button>
+      </form>
+      <form method="post" action="/users/{{ u['id'] }}/delete" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <button class="btn red" type="submit">Remove</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3>Password Reset Requests</h3>
+<table>
+  <tr>
+    <th>User</th>
+    <th>Email</th>
+    <th>Requested</th>
+    <th>Action</th>
+  </tr>
+  {% for req in reset_requests %}
+  <tr>
+    <td data-label="User">{{ req["full_name"] }}</td>
+    <td data-label="Email">{{ req["email"] }}</td>
+    <td data-label="Requested">{{ req["requested_at"][:16].replace("T", " ") }}</td>
+    <td data-label="Action">
+      <form method="post" action="/users/{{ req['user_id'] }}/reset-password" class="inline-form">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <button class="btn orange" type="submit">Reset Password</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr>
+    <td colspan="4">No pending reset requests.</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

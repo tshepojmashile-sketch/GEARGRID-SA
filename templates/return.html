@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+{% if request.query_params.get("error") %}
+  <p class="error">{{ request.query_params.get("error") }}</p>
+{% endif %}
+<p><strong>Equipment:</strong> {{ equipment["name"] }}</p>
+<p class="meta">Rented units: <strong>{{ max_units }}</strong></p>
+<form method="post" action="/return/{{ equipment['id'] }}">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <label for="units">Units to return</label>
+  <input id="units" name="units" type="number" min="1" max="{{ max_units }}" value="{{ max_units }}" required>
+  <button class="btn green" type="submit">Return</button>
+</form>
+<p><a href="/">Back</a></p>
+{% endblock %}

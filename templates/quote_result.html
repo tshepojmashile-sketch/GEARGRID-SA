@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block content %}
+<p><strong>Client:</strong> {{ client_name }}</p>
+<p><strong>Date:</strong> {{ quote_date }}</p>
+<p><strong>Quote #:</strong> {{ quote_number }}</p>
+
+<table>
+  <tr>
+    <th>Type</th>
+    <th>Qty</th>
+    <th>Description</th>
+    <th>Supplier</th>
+    <th>Unit Price</th>
+    <th>Days</th>
+    <th>Line Total</th>
+    <th>On client PDF</th>
+  </tr>
+  {% for line in lines %}
+  <tr>
+    <td data-label="Type">{% if line.get("line_type") == "sub_rental" %}Sub-rental{% else %}Owned{% endif %}</td>
+    <td data-label="Qty">{{ line["qty"] }}</td>
+    <td data-label="Description">{{ line["name"] }}</td>
+    <td data-label="Supplier">{% if line.get("line_type") == "sub_rental" %}{{ line.get("supplier_name") or "—" }}{% else %}—{% endif %}</td>
+    <td data-label="Unit Price">R{{ line["unit_price"] }}</td>
+    <td data-label="Days">{{ line["days"] }}</td>
+    <td data-label="Line Total">R{{ line["line_total"] }}</td>
+    <td data-label="On client PDF">{% if line.get("line_type") == "sub_rental" %}{% if line.get("show_on_quote") in [1, "1", True] %}Yes{% else %}No{% endif %}{% else %}Yes{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<p><strong>Subtotal:</strong> R{{ totals.subtotal }}</p>
+{% if totals.discount_amount > 0 %}
+<p><strong>Discount ({{ "%.2f"|format(totals.discount_percent) }}%):</strong> <span style="color:#b91c1c">R{{ totals.discount_amount }}</span></p>
+{% endif %}
+{% if totals.vat_enabled and totals.vat_amount > 0 %}
+<p><strong>VAT ({{ "%.2f"|format(totals.vat_percent) }}%):</strong> R{{ totals.vat_amount }}</p>
+{% endif %}
+<p><strong>Grand total: R{{ total }}</strong></p>
+<p><a class="btn green" href="{{ download_url }}">Download PDF</a></p>
+{% if quote_id is defined %}
+<p class="meta">This quote is saved as <strong>pending</strong> on the <a href="/quotes/dashboard">Quote Dashboard</a> for approval.</p>
+{% endif %}
+<p><a href="/">Back</a></p>
+{% endblock %}

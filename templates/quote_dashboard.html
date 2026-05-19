@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block content %}
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+
+<section class="quote-performance" aria-label="Quote performance summary">
+  <h2 class="quote-performance__heading">Performance summary</h2>
+  <div class="quote-performance__grid">
+    <div class="quote-performance__card quote-performance__card--neutral">
+      <span class="quote-performance__label">Total quotes</span>
+      <span class="quote-performance__value">{{ quote_total }}</span>
+    </div>
+    <div class="quote-performance__card quote-performance__card--approved">
+      <span class="quote-performance__label">Approved</span>
+      <span class="quote-performance__value">{{ approved_count }}</span>
+    </div>
+    <div class="quote-performance__card quote-performance__card--pending">
+      <span class="quote-performance__label">Pending</span>
+      <span class="quote-performance__value">{{ pending_count }}</span>
+    </div>
+    <div class="quote-performance__card quote-performance__card--rejected">
+      <span class="quote-performance__label">Rejected</span>
+      <span class="quote-performance__value">{{ rejected_count }}</span>
+    </div>
+    <div class="quote-performance__card quote-performance__card--neutral">
+      <span class="quote-performance__label">Conversion rate</span>
+      <span class="quote-performance__value">{{ conversion_pct }}%</span>
+      <span class="quote-performance__hint">approved ÷ total</span>
+    </div>
+    <div class="quote-performance__card quote-performance__card--approved">
+      <span class="quote-performance__label">Approved quotes value</span>
+      <span class="quote-performance__value">R{{ approved_value }}</span>
+    </div>
+    <div class="quote-performance__card quote-performance__card--pending">
+      <span class="quote-performance__label">Outstanding invoice balance</span>
+      <span class="quote-performance__value">R{{ outstanding_invoices }}</span>
+      <span class="quote-performance__hint">unpaid + partial remaining</span>
+    </div>
+  </div>
+</section>
+
+<h2 class="title" style="margin-top:0">Quotes</h2>
+<p class="meta" style="margin-bottom:16px">Approve to create an unpaid invoice and an upcoming job. Reject to close without creating records.</p>
+
+<table class="quote-dash-table">
+  <thead>
+    <tr>
+      <th>Quote #</th>
+      <th>Client</th>
+      <th>Date</th>
+      <th>Total</th>
+      <th>Status</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for q in quotes %}
+    <tr>
+      <td data-label="Quote #">{{ q["quote_number"] }}</td>
+      <td data-label="Client">{{ q["client_name"] }}</td>
+      <td data-label="Date">{{ q["quote_date"] }}</td>
+      <td data-label="Total">R{{ q["total"] }}</td>
+      <td data-label="Status">
+        {% if q["status"] == "approved" %}
+          <span class="status-badge status-badge--approved">approved</span>
+        {% elif q["status"] == "rejected" %}
+          <span class="status-badge status-badge--rejected">rejected</span>
+        {% else %}
+          <span class="status-badge status-badge--pending">pending</span>
+        {% endif %}
+      </td>
+      <td data-label="Actions">
+        <a class="btn btn-sm btn-secondary-outline" href="/quotes/{{ q['id'] }}/pdf" style="margin-right:6px">Download PDF</a>
+        {% if q["status"] == "pending" %}
+        <form method="post" action="/quotes/{{ q['id'] }}/approve" class="inline-form" style="display:inline-block;margin-right:6px">
+          <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+          <button type="submit" class="btn btn-sm green">Approve</button>
+        </form>
+        <form method="post" action="/quotes/{{ q['id'] }}/reject" class="inline-form" style="display:inline-block">
+          <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+          <button type="submit" class="btn btn-sm red">Reject</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No quotes yet. Create one from <a href="/quote">Create Quote</a>.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2 class="title" style="margin-top:28px">Jobs</h2>
+<p class="meta" style="margin-bottom:16px">Update job status (logged with user and time). Warehouse staff can advance jobs from the <a href="/warehouse">Warehouse</a> dashboard.</p>
+
+<table class="quote-dash-table">
+  <thead>
+    <tr>
+      <th>Job</th>
+      <th>Client</th>
+      <th>Job date</th>
+      <th>Quote</th>
+      <th>Status</th>
+      <th>Update</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for j in jobs %}
+    <tr>
+      <td data-label="Job">#{{ j["id"] }}</td>
+      <td data-label="Client">{{ j["client_name"] }}</td>
+      <td data-label="Job date">{{ j["job_date"] }}</td>
+      <td data-label="Quote">{{ j["quote_number"] or "—" }}</td>
+      <td data-label="Status">
+        {% if j["status"] == "upcoming" %}
+          <span class="status-badge status-badge--job-upcoming">upcoming</span>
+        {% elif j["status"] == "active" %}
+          <span class="status-badge status-badge--job-active">active</span>
+        {% elif j["status"] == "done" %}
+          <span class="status-badge status-badge--job-done">done</span>
+        {% else %}
+          <span class="meta">{{ j["status"] }}</span>
+        {% endif %}
+      </td>
+      <td data-label="Update">
+        <form method="post" action="/quotes/dashboard/job/{{ j['id'] }}/status" class="inline-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+          <select name="job_status" aria-label="Job status for job {{ j['id'] }}">
+            {% for s in ["upcoming", "active", "done"] %}
+            <option value="{{ s }}" {% if j["status"] == s %}selected{% endif %}>{{ s }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-sm btn-primary-outline">Save</button>
+        </form>
+        <a class="btn btn-sm btn-secondary-outline" href="/warehouse/job/{{ j['id'] }}">Prep sheet</a>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6">No jobs yet. Approving a quote creates a job.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

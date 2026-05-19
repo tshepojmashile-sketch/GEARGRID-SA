@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="meta" style="margin-top:0"><a href="/invoices">← Back to invoices</a></p>
+
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+
+<div class="invoice-brand {% if overdue %}invoice-brand--overdue{% endif %}">
+  {% if logo_href %}
+  <div class="invoice-brand__logo"><img src="{{ logo_href }}" alt=""></div>
+  {% endif %}
+  <div class="invoice-brand__text">
+    <div class="invoice-brand__name">{{ settings.get("company_name") or "Company" }}</div>
+    {% if settings.get("address") %}<div class="invoice-brand__line">{{ settings["address"] }}</div>{% endif %}
+    {% if settings.get("email") %}<div class="invoice-brand__line">{{ settings["email"] }}</div>{% endif %}
+    {% if settings.get("phone") %}<div class="invoice-brand__line">{{ settings["phone"] }}</div>{% endif %}
+  </div>
+</div>
+
+<div class="invoice-meta-grid">
+  <div>
+    <div class="invoice-meta-label">Invoice number</div>
+    <div class="invoice-meta-value">{{ invoice["invoice_number"] }}</div>
+  </div>
+  <div>
+    <div class="invoice-meta-label">Date created</div>
+    <div class="invoice-meta-value">{{ (invoice["created_at"] or "")[:19]|replace("T", " ") }}</div>
+  </div>
+  <div>
+    <div class="invoice-meta-label">Due date</div>
+    <div class="invoice-meta-value">{{ invoice["due_date"] or "—" }}</div>
+  </div>
+  <div>
+    <div class="invoice-meta-label">Payment status</div>
+    <div class="invoice-meta-value">
+      {% set ps = (invoice["payment_status"] or "unpaid")|lower %}
+      {% if ps == "paid" %}
+        <span class="status-badge status-badge--inv-paid">paid</span>
+      {% elif ps == "partial" %}
+        <span class="status-badge status-badge--inv-partial">partial</span>
+      {% else %}
+        <span class="status-badge status-badge--inv-unpaid">unpaid</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<h2 class="title" style="margin-top:24px">Client</h2>
+<p><strong>{{ invoice["client_name"] }}</strong></p>
+{% if client_contact %}
+<p class="meta">{{ client_contact }}</p>
+{% else %}
+<p class="meta">No address or contact on file for this client name.</p>
+{% endif %}
+
+<h2 class="title" style="margin-top:24px">Line items</h2>
+<table class="quote-dash-table">
+  <thead>
+    <tr>
+      <th>Equipment</th>
+      <th>Qty</th>
+      <th>Unit price</th>
+      <th>Days</th>
+      <th>Line total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for line in line_items %}
+    <tr>
+      <td data-label="Equipment">{{ line.get("name", "—") }}</td>
+      <td data-label="Qty">{{ line.get("qty", 1) }}</td>
+      <td data-label="Unit price">R{{ line.get("unit_price", 0) }}</td>
+      <td data-label="Days">{{ line.get("days", 1) }}</td>
+      <td data-label="Line total">R{{ line.get("line_total", 0) }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5">No line items.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="invoice-totals">
+  <div class="invoice-totals__row"><span>Subtotal</span><span>R{{ subtotal }}</span></div>
+  {% if fin.discount_amount > 0 %}
+  <div class="invoice-totals__row" style="color:#b91c1c"><span>Discount ({{ "%.2f"|format(fin.discount_percent) }}%)</span><span>R{{ fin.discount_amount }}</span></div>
+  {% endif %}
+  {% if fin.vat_enabled and fin.vat_amount > 0 %}
+  <div class="invoice-totals__row"><span>VAT ({{ "%.2f"|format(fin.vat_percent) }}%)</span><span>R{{ fin.vat_amount }}</span></div>
+  {% endif %}
+  <div class="invoice-totals__row invoice-totals__row--strong"><span>Grand total</span><span>R{{ total }}</span></div>
+  <div class="invoice-totals__row"><span>Amount paid</span><span>R{{ amount_paid }}</span></div>
+  <div class="invoice-totals__row"><span>Remaining balance</span><span>R{{ remaining }}</span></div>
+</div>
+
+{% if settings.get("bank_name") and settings.get("bank_account_number") %}
+<h2 class="title" style="margin-top:20px">Banking details</h2>
+<div class="meta" style="line-height:1.6">
+  Bank: {{ settings["bank_name"] }}<br>
+  {% if settings.get("bank_account_holder") %}Account holder: {{ settings["bank_account_holder"] }}<br>{% endif %}
+  Account number: {{ settings["bank_account_number"] }}<br>
+  {% if settings.get("bank_account_type") %}Account type: {{ settings["bank_account_type"] }}<br>{% endif %}
+  {% if settings.get("bank_branch_code") %}Branch code: {{ settings["bank_branch_code"] }}<br>{% endif %}
+  {% if settings.get("bank_reference") %}Reference: {{ settings["bank_reference"] }}<br>{% endif %}
+</div>
+{% endif %}
+
+{% if settings.get("quote_footer") %}
+<h2 class="title" style="margin-top:20px">Notes</h2>
+<p class="meta">{{ settings["quote_footer"] }}</p>
+{% endif %}
+
+<h2 class="title" style="margin-top:24px">Payment history</h2>
+{% if payments %}
+<table class="quote-dash-table">
+  <thead>
+    <tr>
+      <th>Amount</th>
+      <th>Recorded by</th>
+      <th>When</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in payments %}
+    <tr>
+      <td data-label="Amount">R{{ p["amount"] }}</td>
+      <td data-label="Recorded by">{{ p["recorded_by_name"] }}</td>
+      <td data-label="When">{{ (p["recorded_at"] or "")[:19]|replace("T", " ") }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="meta">No payments recorded yet.</p>
+{% endif %}
+
+<div class="invoice-actions">
+  <a class="btn btn-primary-outline" href="/invoices/{{ invoice['id'] }}/pdf">Download PDF</a>
+</div>
+
+<h2 class="title" style="margin-top:28px">Record payment</h2>
+<form method="post" action="/invoices/{{ invoice['id'] }}/payment" class="invoice-payment-form">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <label for="payment_amount">Amount paid (Rands, whole number)</label><br>
+  <input id="payment_amount" name="payment_amount" type="number" min="1" step="1" required>
+  <button type="submit" class="btn blue">Record payment</button>
+</form>
+{% endblock %}

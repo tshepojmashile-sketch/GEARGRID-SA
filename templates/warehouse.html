@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="warehouse-page">
+  {% if request.query_params.get("error") %}
+    <p class="error">{{ request.query_params.get("error") }}</p>
+  {% endif %}
+  <p class="warehouse-lead">Upcoming and active jobs. Tap a job to open the prep sheet.</p>
+  <ul class="warehouse-job-list">
+    {% for j in jobs %}
+    <li>
+      <a class="warehouse-job-card" href="/warehouse/job/{{ j['id'] }}">
+        <span class="warehouse-job-card__title">Job #{{ j["id"] }}</span>
+        <span class="warehouse-job-card__meta">{{ j["client_name"] }}</span>
+        <span class="warehouse-job-card__meta">Date: {{ j["job_date"] }}</span>
+        <span class="warehouse-job-card__meta">Items: {{ j["item_count"] or 0 }}</span>
+        <span class="status-badge status-badge--job-{{ j['status'] }}">{{ j["status"] }}</span>
+      </a>
+    </li>
+    {% else %}
+    <li class="warehouse-empty">No jobs to prepare right now.</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}

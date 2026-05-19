@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="warehouse-page warehouse-job-page">
+  {% if request.query_params.get("error") %}
+    <p class="error">{{ request.query_params.get("error") }}</p>
+  {% endif %}
+  <p class="meta"><a href="{{ back_url }}">← Back</a></p>
+  <p class="warehouse-lead">Job #{{ job["id"] }} · {{ job["job_date"] }} ·
+    {% if job["status"] == "upcoming" %}
+      <span class="status-badge status-badge--job-upcoming">upcoming</span>
+    {% elif job["status"] == "active" %}
+      <span class="status-badge status-badge--job-active">active</span>
+    {% elif job["status"] == "done" %}
+      <span class="status-badge status-badge--job-done">done</span>
+    {% else %}
+      <strong>{{ job["status"] }}</strong>
+    {% endif %}
+  </p>
+  <p class="warehouse-client-line"><strong>Client:</strong> {{ job["client_name"] }}</p>
+
+  {% if current_user["role"] == "warehouse" %}
+    {% if job["status"] == "upcoming" %}
+    <form method="post" action="/warehouse/job/{{ job['id'] }}/status" class="warehouse-status-form">
+      <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+      <input type="hidden" name="job_status" value="active">
+      <button type="submit" class="btn blue">Mark active (equipment out)</button>
+    </form>
+    {% elif job["status"] == "active" %}
+    <form method="post" action="/warehouse/job/{{ job['id'] }}/status" class="warehouse-status-form">
+      <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+      <input type="hidden" name="job_status" value="done">
+      <button type="submit" class="btn green">Mark done</button>
+    </form>
+    {% endif %}
+  {% else %}
+  <form method="post" action="/jobs/{{ job['id'] }}/status" class="warehouse-status-form" style="margin-bottom:16px">
+    <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+    <input type="hidden" name="redirect_to" value="/warehouse/job/{{ job['id'] }}">
+    <label class="meta" for="mgmt-status">Job status</label>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px">
+      <select name="job_status" id="mgmt-status">
+        {% for s in ["upcoming", "active", "done"] %}
+        <option value="{{ s }}" {% if job["status"] == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-sm btn-primary-outline">Save status</button>
+    </div>
+  </form>
+  {% endif %}
+
+  <h2 class="title" style="margin-top:20px;font-size:1.1rem">Equipment prep</h2>
+  <ul class="warehouse-prep-list">
+    {% for row in prep_items %}
+    <li class="warehouse-prep-row">
+      {% if (row['line_type'] or 'owned') == 'sub_rental' %}
+      <div class="warehouse-prep-sub">
+        <p class="warehouse-prep-sub-from">From: {{ row["supplier_name"] or "—" }}</p>
+        <form method="post" action="/warehouse/job/{{ job['id'] }}/prep/{{ row['id'] }}/received" class="warehouse-prep-form">
+          <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+          <label class="warehouse-prep-label">
+            <input type="checkbox" {% if row["received_from_supplier"] %}checked{% endif %} onchange="this.form.submit()">
+            <span class="warehouse-prep-text">
+              <span class="warehouse-prep-name">Received from supplier</span>
+              <span class="warehouse-prep-sub-line">{{ row["equipment_name"] }} · Qty {{ row["quantity"] }}</span>
+            </span>
+          </label>
+        </form>
+      </div>
+      {% else %}
+      <form method="post" action="/warehouse/job/{{ job['id'] }}/prep/{{ row['id'] }}/toggle" class="warehouse-prep-form">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <label class="warehouse-prep-label">
+          <input type="checkbox" {% if row["packed"] %}checked{% endif %} onchange="this.form.submit()">
+          <span class="warehouse-prep-text">
+            <span class="warehouse-prep-name">{{ row["equipment_name"] }}</span>
+            <span class="warehouse-prep-qty">Qty {{ row["quantity"] }}</span>
+          </span>
+        </label>
+      </form>
+      {% endif %}
+    </li>
+    {% else %}
+    <li class="warehouse-empty">No line items for this job.</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endblock %}
