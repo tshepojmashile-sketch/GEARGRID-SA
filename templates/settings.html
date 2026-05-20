@@ -50,6 +50,9 @@
   <label>Quote Footer</label><br>
   <input name="quote_footer" value="{{ settings['quote_footer'] or '' }}"><br><br>
 
+  <label>Terms and Conditions (default for new quotes)</label><br>
+  <textarea name="terms_and_conditions" rows="10" style="width:100%;max-width:640px">{{ settings.get('terms_and_conditions') or '' }}</textarea><br><br>
+
   <h2 class="title" style="margin-top:8px;font-size:1.1rem">Banking Details</h2>
   <p class="meta">Shown on quote and invoice PDFs when bank name and account number are filled in.</p>
   <label>Bank Name</label><br>

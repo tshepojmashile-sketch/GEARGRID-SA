@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+{% if error %}
+  <p class="error">{{ error }}</p>
+{% endif %}
+{% if request.query_params.get("error") %}
+  <p class="error">{{ request.query_params.get("error") }}</p>
+{% endif %}
+
+<form method="post" action="/clients/{{ client['id'] }}/edit">
+  <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+  <label>Company name</label><br>
+  <input name="name" value="{{ client['name'] }}" required><br><br>
+  <label>Contact person</label><br>
+  <input name="contact_person" value="{{ client['contact_person'] or '' }}"><br><br>
+  <label>Phone</label><br>
+  <input name="phone" value="{{ client['phone'] or '' }}"><br><br>
+  <label>Email</label><br>
+  <input name="email" type="email" value="{{ client['email'] or '' }}"><br><br>
+  <label>Address</label><br>
+  <input name="address" value="{{ client['address'] or '' }}"><br><br>
+  <label>VAT number</label><br>
+  <input name="vat_number" value="{{ client['vat_number'] or '' }}"><br><br>
+  <button class="btn blue" type="submit">Save</button>
+</form>
+<p class="meta" style="margin-top:16px"><a href="/clients">Back to Clients</a></p>
+{% endblock %}

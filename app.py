@@ -12,7 +12,7 @@ from io import BytesIO
 from xml.sax.saxutils import escape
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -185,6 +185,16 @@ def init_db() -> None:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN company_id INTEGER DEFAULT 1")
         cursor.execute(f"UPDATE {table} SET company_id=1 WHERE company_id IS NULL")
 
+    for col, ddl in (
+        ("contact_person", "ALTER TABLE clients ADD COLUMN contact_person TEXT"),
+        ("phone", "ALTER TABLE clients ADD COLUMN phone TEXT"),
+        ("email", "ALTER TABLE clients ADD COLUMN email TEXT"),
+        ("address", "ALTER TABLE clients ADD COLUMN address TEXT"),
+        ("vat_number", "ALTER TABLE clients ADD COLUMN vat_number TEXT"),
+    ):
+        if not has_column(cursor, "clients", col):
+            cursor.execute(ddl)
+
     if not has_column(cursor, "rental_history", "units"):
         cursor.execute("ALTER TABLE rental_history ADD COLUMN units INTEGER NOT NULL DEFAULT 1")
 
@@ -257,6 +267,7 @@ def init_db() -> None:
         ("bank_account_type", "ALTER TABLE companies ADD COLUMN bank_account_type TEXT"),
         ("bank_branch_code", "ALTER TABLE companies ADD COLUMN bank_branch_code TEXT"),
         ("bank_reference", "ALTER TABLE companies ADD COLUMN bank_reference TEXT"),
+        ("terms_and_conditions", "ALTER TABLE companies ADD COLUMN terms_and_conditions TEXT"),
     ):
         if not has_column(cursor, "companies", col):
             cursor.execute(ddl)
@@ -298,6 +309,12 @@ def init_db() -> None:
         ("vat_percent", "ALTER TABLE quotes ADD COLUMN vat_percent REAL NOT NULL DEFAULT 15"),
         ("vat_amount", "ALTER TABLE quotes ADD COLUMN vat_amount INTEGER NOT NULL DEFAULT 0"),
         ("grand_total", "ALTER TABLE quotes ADD COLUMN grand_total INTEGER"),
+        ("job_name", "ALTER TABLE quotes ADD COLUMN job_name TEXT"),
+        ("site_location", "ALTER TABLE quotes ADD COLUMN site_location TEXT"),
+        ("start_date", "ALTER TABLE quotes ADD COLUMN start_date TEXT"),
+        ("end_date", "ALTER TABLE quotes ADD COLUMN end_date TEXT"),
+        ("special_notes", "ALTER TABLE quotes ADD COLUMN special_notes TEXT"),
+        ("quote_terms", "ALTER TABLE quotes ADD COLUMN quote_terms TEXT"),
     ):
         if not has_column(cursor, "quotes", qcol):
             cursor.execute(qddl)
@@ -1014,9 +1031,30 @@ def build_invoice_pdf_bytes(
     story.append(header_table)
     story.append(Spacer(1, 14))
 
-    client_name = escape(str(inv.get("client_name") or "—"))
-    story.append(Paragraph(f"<b>Client</b><br/>{client_name}", styles["Normal"]))
-    story.append(Spacer(1, 12))
+    client_name = str(inv.get("client_name") or "—")
+    client_prof = client_profile_by_name(cid, client_name) if cid else None
+    for flow in pdf_client_details_flowables(client_name, client_prof, styles):
+        story.append(flow)
+    quote_row = None
+    qid = inv.get("quote_id")
+    if cid and qid:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM quotes WHERE id=? AND company_id=?", (int(qid), cid))
+        quote_row = cur.fetchone()
+        conn.close()
+    if quote_row:
+        qd = dict(quote_row)
+        for flow in pdf_job_details_flowables(
+            qd.get("job_name"),
+            qd.get("site_location"),
+            qd.get("start_date"),
+            qd.get("end_date"),
+            qd.get("special_notes"),
+            styles,
+        ):
+            story.append(flow)
+    story.append(Spacer(1, 4))
 
     inv_equip_cell_style = ParagraphStyle(
         name="InvoicePdfEquipmentCell",
@@ -1155,6 +1193,11 @@ def build_invoice_pdf_bytes(
     )
     story.append(summary_tbl)
     story.append(Spacer(1, 16))
+    inv_terms = ""
+    if quote_row:
+        inv_terms = str(dict(quote_row).get("quote_terms") or "").strip()
+    for flow in pdf_terms_flowables(inv_terms, styles):
+        story.append(flow)
     for flow in pdf_banking_detail_flowables(settings, styles):
         story.append(flow)
     story.append(Spacer(1, 8))
@@ -1351,6 +1394,7 @@ def get_company_settings(company_id: int) -> dict:
             "bank_account_type",
             "bank_branch_code",
             "bank_reference",
+            "terms_and_conditions",
         ):
             out[fld] = (cod.get(fld) or "").strip() if cod.get(fld) is not None else ""
     out.setdefault("quote_footer", "")
@@ -1364,6 +1408,7 @@ def get_company_settings(company_id: int) -> dict:
         "bank_account_type",
         "bank_branch_code",
         "bank_reference",
+        "terms_and_conditions",
     ):
         out.setdefault(fld, "")
     return out
@@ -1389,6 +1434,111 @@ def pdf_banking_detail_flowables(settings: dict, styles) -> list:
     if ref:
         parts.append(f"Reference: {escape(ref)}")
     return [Spacer(1, 10), Paragraph("<br/>".join(parts), styles["Normal"])]
+
+
+def client_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    d = dict(row)
+    return {
+        "id": d.get("id"),
+        "name": (d.get("name") or "").strip(),
+        "contact_person": (d.get("contact_person") or "").strip(),
+        "phone": (d.get("phone") or "").strip(),
+        "email": (d.get("email") or "").strip(),
+        "address": (d.get("address") or "").strip(),
+        "vat_number": (d.get("vat_number") or "").strip(),
+    }
+
+
+def client_profile_by_name(company_id: int, client_name: str | None) -> dict | None:
+    name = (client_name or "").strip()
+    if not name:
+        return None
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT * FROM clients WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
+        (company_id, name),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return client_row_to_dict(row)
+
+
+def client_profile_by_id(company_id: int, client_id: int) -> dict | None:
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM clients WHERE id=? AND company_id=?", (client_id, company_id))
+    row = cursor.fetchone()
+    conn.close()
+    return client_row_to_dict(row)
+
+
+def pdf_client_details_flowables(client_name: str, profile: dict | None, styles) -> list:
+    parts = ["<b>Client</b>", f"<b>{escape(str(client_name or '').strip() or '—')}</b>"]
+    if profile:
+        for label, key in (
+            ("Contact Person", "contact_person"),
+            ("Phone", "phone"),
+            ("Email", "email"),
+            ("Address", "address"),
+            ("VAT Number", "vat_number"),
+        ):
+            val = str(profile.get(key) or "").strip()
+            if val:
+                parts.append(f"{label}: {escape(val)}")
+    return [Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 8)]
+
+
+def pdf_job_details_flowables(
+    job_name: str | None,
+    site_location: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    special_notes: str | None,
+    styles,
+) -> list:
+    jn = str(job_name or "").strip()
+    sl = str(site_location or "").strip()
+    sd = str(start_date or "").strip()
+    ed = str(end_date or "").strip()
+    sn = str(special_notes or "").strip()
+    if not any([jn, sl, sd, ed, sn]):
+        return []
+    parts = ["<b>Job Details</b>"]
+    if jn:
+        parts.append(f"Job Name: {escape(jn)}")
+    if sl:
+        parts.append(f"Site / Location: {escape(sl)}")
+    if sd:
+        parts.append(f"Start Date: {escape(sd)}")
+    if ed:
+        parts.append(f"End Date: {escape(ed)}")
+    if sn:
+        parts.append(f"Notes: {escape(sn)}")
+    return [Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 8)]
+
+
+def pdf_terms_flowables(terms: str | None, styles) -> list:
+    text = str(terms or "").strip()
+    if not text:
+        return []
+    body = escape(text).replace("\n", "<br/>")
+    return [Spacer(1, 8), Paragraph(f"<b>Terms and Conditions</b><br/>{body}", styles["Normal"])]
+
+
+def quote_meta_from_row(qdict: dict | None, company_id: int, client_name: str) -> dict:
+    qd = qdict or {}
+    return {
+        "job_name": qd.get("job_name"),
+        "site_location": qd.get("site_location"),
+        "start_date": qd.get("start_date"),
+        "end_date": qd.get("end_date"),
+        "special_notes": qd.get("special_notes"),
+        "quote_terms": qd.get("quote_terms"),
+        "client_profile": client_profile_by_name(company_id, client_name),
+    }
 
 
 def company_static_logo_path(company_id: int) -> Path:
@@ -1909,6 +2059,7 @@ async def update_settings(request: Request):
     bank_account_type = str(form.get("bank_account_type", "")).strip()
     bank_branch_code = str(form.get("bank_branch_code", "")).strip()
     bank_reference = str(form.get("bank_reference", "")).strip()
+    terms_and_conditions = str(form.get("terms_and_conditions", "")).strip()
     if not company_name:
         return RedirectResponse(url="/settings?error=Company%20name%20is%20required", status_code=303)
     logo_upload = form.get("logo")
@@ -1923,7 +2074,8 @@ async def update_settings(request: Request):
         """
         UPDATE companies
         SET name=?, tagline=?, email=?, phone=?, address=?, vat_number=?, vat_percent=?, vat_enabled=?, default_discount_percent=?,
-            bank_name=?, bank_account_holder=?, bank_account_number=?, bank_account_type=?, bank_branch_code=?, bank_reference=?
+            bank_name=?, bank_account_holder=?, bank_account_number=?, bank_account_type=?, bank_branch_code=?, bank_reference=?,
+            terms_and_conditions=?
         WHERE id=?
         """,
         (
@@ -1942,6 +2094,7 @@ async def update_settings(request: Request):
             bank_account_type,
             bank_branch_code,
             bank_reference,
+            terms_and_conditions,
             user["company_id"],
         ),
     )
@@ -2075,7 +2228,8 @@ def quote_saved_pdf(request: Request, quote_id: int):
     date = qdict["quote_date"]
     qnum = qdict["quote_number"]
     fin = quote_financials_from_saved_row(qdict, lines)
-    return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quotes/dashboard")
+    meta = quote_meta_from_row(qdict, user["company_id"], client)
+    return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quotes/dashboard", quote_meta=meta)
 
 
 @app.post("/quotes/{quote_id}/approve")
@@ -2608,25 +2762,108 @@ def clients_page(request: Request):
         return response
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM clients WHERE company_id=? ORDER BY id DESC", (user["company_id"],))
+    cursor.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC", (user["company_id"],))
     clients = cursor.fetchall()
     conn.close()
-    return templates.TemplateResponse(request=request, name="clients.html", context={"title": "Clients", "clients": clients, "current_user": user})
+    err = request.query_params.get("error", "")
+    return templates.TemplateResponse(
+        request=request,
+        name="clients.html",
+        context={"title": "Clients", "clients": clients, "current_user": user, "error": err},
+    )
 
 
 @app.post("/clients")
-async def add_client(request: Request, name: str = Form(...)):
+async def add_client(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", "/clients", user)
-    clean_name = name.strip()
+    form = await request.form()
+    clean_name = str(form.get("name", "")).strip()
     if not clean_name:
         return RedirectResponse(url="/clients?error=Client%20name%20is%20required", status_code=303)
+    contact_person = str(form.get("contact_person", "")).strip()
+    phone = str(form.get("phone", "")).strip()
+    email = str(form.get("email", "")).strip()
+    address = str(form.get("address", "")).strip()
+    vat_number = str(form.get("vat_number", "")).strip()
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO clients (name, company_id) VALUES (?, ?)", (clean_name, user["company_id"]))
+    cursor.execute(
+        """
+        INSERT INTO clients (name, company_id, contact_person, phone, email, address, vat_number)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (clean_name, user["company_id"], contact_person, phone, email, address, vat_number),
+    )
+    conn.commit()
+    conn.close()
+    return RedirectResponse(url="/clients", status_code=303)
+
+
+@app.get("/clients/{client_id}/details")
+def client_details_json(request: Request, client_id: int):
+    user, response = get_current_user(request, allowed_roles={"admin", "management"})
+    if response:
+        return response
+    profile = client_profile_by_id(user["company_id"], client_id)
+    if not profile:
+        return JSONResponse({"error": "Client not found"}, status_code=404)
+    return JSONResponse(profile)
+
+
+@app.get("/clients/{client_id}/edit", response_class=HTMLResponse)
+def client_edit_page(request: Request, client_id: int):
+    user, response = get_current_user(request, allowed_roles={"admin", "management"})
+    if response:
+        return response
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM clients WHERE id=? AND company_id=?", (client_id, user["company_id"]))
+    client = cursor.fetchone()
+    conn.close()
+    if not client:
+        return render_message(request, "Error", "Client not found.", "/clients", user)
+    err = request.query_params.get("error", "")
+    return templates.TemplateResponse(
+        request=request,
+        name="client_edit.html",
+        context={"title": "Edit Client", "client": client, "current_user": user, "error": err},
+    )
+
+
+@app.post("/clients/{client_id}/edit")
+async def client_edit_save(request: Request, client_id: int):
+    user, response = get_current_user(request, allowed_roles={"admin", "management"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", f"/clients/{client_id}/edit", user)
+    form = await request.form()
+    clean_name = str(form.get("name", "")).strip()
+    if not clean_name:
+        return RedirectResponse(url=f"/clients/{client_id}/edit?error=Client%20name%20is%20required", status_code=303)
+    contact_person = str(form.get("contact_person", "")).strip()
+    phone = str(form.get("phone", "")).strip()
+    email = str(form.get("email", "")).strip()
+    address = str(form.get("address", "")).strip()
+    vat_number = str(form.get("vat_number", "")).strip()
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM clients WHERE id=? AND company_id=?", (client_id, user["company_id"]))
+    if not cursor.fetchone():
+        conn.close()
+        return RedirectResponse(url="/clients?error=Not%20found", status_code=303)
+    cursor.execute(
+        """
+        UPDATE clients
+        SET name=?, contact_person=?, phone=?, email=?, address=?, vat_number=?
+        WHERE id=? AND company_id=?
+        """,
+        (clean_name, contact_person, phone, email, address, vat_number, client_id, user["company_id"]),
+    )
     conn.commit()
     conn.close()
     return RedirectResponse(url="/clients", status_code=303)
@@ -2827,26 +3064,48 @@ def quote_page(request: Request):
         (user["company_id"],),
     )
     sub_rentals = cursor.fetchall()
+    cursor.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC", (user["company_id"],))
+    clients = cursor.fetchall()
     conn.close()
     company = get_company_settings(user["company_id"])
     return templates.TemplateResponse(
         request=request,
         name="quote.html",
-        context={"title": "Create Quote", "items": items, "sub_rentals": sub_rentals, "company": company, "current_user": user},
+        context={
+            "title": "Create Quote",
+            "items": items,
+            "sub_rentals": sub_rentals,
+            "clients": clients,
+            "company": company,
+            "current_user": user,
+        },
     )
 
 
 @app.post("/quote", response_class=HTMLResponse)
-async def generate_quote(request: Request, client_name: str = Form(default="")):
+async def generate_quote(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", "/quote", user)
-    clean_client_name = client_name.strip()
-    if not clean_client_name:
-        return render_message(request, "Create Quote", "Client name is required.", "/quote", user)
     form_data = await request.form()
+    try:
+        client_id = int(str(form_data.get("client_id", "")).strip())
+    except ValueError:
+        return render_message(request, "Create Quote", "Please select a client.", "/quote", user)
+    profile = client_profile_by_id(user["company_id"], client_id)
+    if not profile:
+        return render_message(request, "Create Quote", "Client not found.", "/quote", user)
+    clean_client_name = profile["name"]
+    job_name = str(form_data.get("job_name", "")).strip()
+    if not job_name:
+        return render_message(request, "Create Quote", "Job name is required.", "/quote", user)
+    site_location = str(form_data.get("site_location", "")).strip()
+    start_date = str(form_data.get("start_date", "")).strip()
+    end_date = str(form_data.get("end_date", "")).strip()
+    special_notes = str(form_data.get("special_notes", "")).strip()
+    quote_terms = str(form_data.get("quote_terms", "")).strip()
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute(
@@ -2972,9 +3231,10 @@ async def generate_quote(request: Request, client_name: str = Form(default="")):
                 """
                 INSERT INTO quotes (
                     company_id, quote_number, client_name, quote_date, total, line_items_json, status, created_at,
-                    subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total
+                    subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total,
+                    job_name, site_location, start_date, end_date, special_notes, quote_terms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user["company_id"],
@@ -2991,6 +3251,12 @@ async def generate_quote(request: Request, client_name: str = Form(default="")):
                     totals["vat_percent"],
                     int(totals["vat_amount"]),
                     grand_total,
+                    job_name,
+                    site_location or None,
+                    start_date or None,
+                    end_date or None,
+                    special_notes or None,
+                    quote_terms or None,
                 ),
             )
             break
@@ -3066,6 +3332,7 @@ def quote_pdf_file_response(
     lines: list,
     fin: dict[str, int | float | bool],
     error_back_url: str,
+    quote_meta: dict | None = None,
 ) -> FileResponse | HTMLResponse:
     """Build quote PDF from in-memory line items and totals; return FileResponse or error page."""
     body_rows, _pdf_vis = quote_lines_for_client_pdf(lines)
@@ -3107,7 +3374,21 @@ def quote_pdf_file_response(
     else:
         content.append(company_blk)
     content.append(Spacer(1, 12))
-    content.append(Paragraph(f"Client: {client}", styles["Normal"]))
+    meta = quote_meta or {}
+    client_prof = meta.get("client_profile")
+    if client_prof is None:
+        client_prof = client_profile_by_name(int(user["company_id"]), client)
+    for flow in pdf_client_details_flowables(client, client_prof, styles):
+        content.append(flow)
+    for flow in pdf_job_details_flowables(
+        meta.get("job_name"),
+        meta.get("site_location"),
+        meta.get("start_date"),
+        meta.get("end_date"),
+        meta.get("special_notes"),
+        styles,
+    ):
+        content.append(flow)
     content.append(Paragraph(f"Date: {date}", styles["Normal"]))
     content.append(Paragraph(f"Quote #: {qnum}", styles["Normal"]))
     content.append(Spacer(1, 12))
@@ -3243,6 +3524,8 @@ def quote_pdf_file_response(
     )
     content.append(total_table)
     content.append(Spacer(1, 10))
+    for flow in pdf_terms_flowables(meta.get("quote_terms"), styles):
+        content.append(flow)
     for flow in pdf_banking_detail_flowables(settings, styles):
         content.append(flow)
     if settings.get("quote_footer"):
@@ -3292,7 +3575,8 @@ def download(
         date = qdict["quote_date"]
         qnum = qdict["quote_number"]
         fin = quote_financials_from_saved_row(qdict, lines)
-        return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quote")
+        meta = quote_meta_from_row(qdict, user["company_id"], client)
+        return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quote", quote_meta=meta)
     elif data:
         client = client or ""
         date = date or ""
@@ -3528,6 +3812,15 @@ def invoice_detail_page(request: Request, invoice_id: int):
         conn.close()
         return render_message(request, "Not found", "Invoice not found.", "/invoices", user)
     inv = dict(inv_row)
+    quote_terms = ""
+    if inv.get("quote_id"):
+        cursor.execute(
+            "SELECT quote_terms FROM quotes WHERE id=? AND company_id=?",
+            (inv["quote_id"], user["company_id"]),
+        )
+        qt_row = cursor.fetchone()
+        if qt_row:
+            quote_terms = str(qt_row["quote_terms"] or "").strip()
     cursor.execute(
         """
         SELECT ip.amount, ip.recorded_at, u.full_name AS recorded_by_name
@@ -3572,6 +3865,7 @@ def invoice_detail_page(request: Request, invoice_id: int):
             "logo_uri": logo_uri,
             "logo_href": logo_href,
             "client_contact": client_contact,
+            "quote_terms": quote_terms,
             "current_user": user,
             "error": err,
         },

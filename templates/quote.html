@@ -2,9 +2,38 @@
 {% block content %}
 <form method="post" id="quote-form">
   <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
-  <input name="client_name" placeholder="Client Name" required>
-  <br><br>
-  <h2 class="title" style="margin-top:0;font-size:1.1rem">Owned equipment</h2>
+
+  <h2 class="title" style="margin-top:0;font-size:1.1rem">Client</h2>
+  <label for="client_id">Select client</label><br>
+  <select name="client_id" id="client_id" required>
+    <option value="">— Choose a client —</option>
+    {% for c in clients %}
+    <option value="{{ c['id'] }}">{{ c["name"] }}</option>
+    {% endfor %}
+  </select>
+  <p class="meta" style="margin-top:8px">Or <a href="/clients">add a client</a> first.</p>
+  <div id="client-details-panel" class="meta" style="margin-top:12px;line-height:1.6;display:none">
+    <strong>Contact details</strong><br>
+    <span id="cd-contact">—</span><br>
+    <span id="cd-phone">—</span><br>
+    <span id="cd-email">—</span><br>
+    <span id="cd-address">—</span>
+  </div>
+  <br>
+
+  <h2 class="title" style="margin-top:8px;font-size:1.1rem">Job details</h2>
+  <label for="job_name">Job name</label> <span class="meta">(required)</span><br>
+  <input name="job_name" id="job_name" required placeholder="e.g. Annual Conference"><br><br>
+  <label for="site_location">Site / location</label><br>
+  <input name="site_location" id="site_location" placeholder="e.g. Sandton Convention Centre"><br><br>
+  <label for="start_date">Start date</label><br>
+  <input type="date" name="start_date" id="start_date"><br><br>
+  <label for="end_date">End date</label><br>
+  <input type="date" name="end_date" id="end_date"><br><br>
+  <label for="special_notes">Special notes</label><br>
+  <textarea name="special_notes" id="special_notes" rows="3" style="width:100%;max-width:480px"></textarea><br><br>
+
+  <h2 class="title" style="margin-top:8px;font-size:1.1rem">Owned equipment</h2>
   {% if items %}
     <table id="quote-owned-table">
       <tr>
@@ -74,7 +103,11 @@
     </p>
     <p><strong>VAT amount:</strong> R<span id="quote-vat-amt">0</span></p>
     <p><strong>Grand total:</strong> R<span id="quote-grand-val">0</span></p>
-    <br>
+
+    <h2 class="title" style="margin-top:24px;font-size:1.1rem">Terms and conditions</h2>
+    <p class="meta">Edit for this quote if needed. Defaults from company settings.</p>
+    <textarea name="quote_terms" id="quote_terms" rows="8" style="width:100%;max-width:640px">{{ company.get('terms_and_conditions') or '' }}</textarea>
+    <br><br>
     <button class="btn purple" type="submit">Create Quote</button>
   {% else %}
     <p>No equipment or sub-rentals available to quote.</p>
@@ -86,6 +119,50 @@
   var form = document.getElementById("quote-form");
   if (!form) return;
   var vatRate = {{ (company.get('vat_percent') or 15)|float }};
+  var clientSelect = document.getElementById("client_id");
+  var panel = document.getElementById("client-details-panel");
+
+  function setClientDetail(id, label, value) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (value) {
+      el.textContent = label + ": " + value;
+      el.style.display = "";
+    } else {
+      el.textContent = "";
+      el.style.display = "none";
+    }
+  }
+
+  function loadClientDetails(clientId) {
+    if (!clientId) {
+      if (panel) panel.style.display = "none";
+      return;
+    }
+    fetch("/clients/" + clientId + "/details")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || data.error) {
+          if (panel) panel.style.display = "none";
+          return;
+        }
+        if (panel) panel.style.display = "block";
+        setClientDetail("cd-contact", "Contact", data.contact_person);
+        setClientDetail("cd-phone", "Phone", data.phone);
+        setClientDetail("cd-email", "Email", data.email);
+        setClientDetail("cd-address", "Address", data.address);
+      })
+      .catch(function () {
+        if (panel) panel.style.display = "none";
+      });
+  }
+
+  if (clientSelect) {
+    clientSelect.addEventListener("change", function () {
+      loadClientDetails(clientSelect.value);
+    });
+  }
+
   function recalc() {
     var sub = 0;
     form.querySelectorAll("tr.js-quote-line").forEach(function (row) {

@@ -93,6 +93,11 @@
   <div class="invoice-totals__row"><span>Remaining balance</span><span>R{{ remaining }}</span></div>
 </div>
 
+{% if quote_terms %}
+<h2 class="title" style="margin-top:20px">Terms and conditions</h2>
+<div class="meta" style="line-height:1.6;white-space:pre-wrap">{{ quote_terms }}</div>
+{% endif %}
+
 {% if settings.get("bank_name") and settings.get("bank_account_number") %}
 <h2 class="title" style="margin-top:20px">Banking details</h2>
 <div class="meta" style="line-height:1.6">
