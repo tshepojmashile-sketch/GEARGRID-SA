@@ -1817,10 +1817,12 @@ def forgot_password_submit(email: str = Form(...)):
     logging.warning(
         f"Forgot password triggered for email: {submitted_email}, SendGrid configured: {bool(os.environ.get('SENDGRID_API_KEY'))}"
     )
+    print("CHECKPOINT 1 - about to query user", flush=True)
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT id, company_id, email FROM users WHERE email=?", (submitted_email,))
     user = cursor.fetchone()
+    print(f"CHECKPOINT 2 - user found: {user is not None}", flush=True)
     if user:
         cursor.execute("SELECT id FROM password_reset_requests WHERE user_id=?", (user["id"],))
         existing = cursor.fetchone()
@@ -1833,6 +1835,7 @@ def forgot_password_submit(email: str = Form(...)):
             token = secrets.token_urlsafe(32)
             expires_at = (datetime.now() + timedelta(hours=1)).isoformat()
             reset_link = f"{BASE_URL}/reset-password/{token}"
+            print("CHECKPOINT 3 - entering try block", flush=True)
             try:
                 cursor.execute(
                     "INSERT INTO password_reset_tokens (user_id, token, expires_at, used) VALUES (?, ?, ?, 0)",
