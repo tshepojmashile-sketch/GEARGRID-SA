@@ -30,6 +30,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "rental.db"
 SESSION_DAYS = 14
 SESSION_SECURE_COOKIE = os.getenv("SESSION_SECURE_COOKIE", "0") == "1"
+BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 VALID_ROLES = {"admin", "management", "warehouse"}
 JOB_STATUSES = {"upcoming", "active", "done"}
 QUOTE_STATUSES = {"pending", "approved", "rejected"}
@@ -130,6 +131,19 @@ def init_db() -> None:
             user_id INTEGER NOT NULL,
             company_id INTEGER NOT NULL,
             requested_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT NOT NULL UNIQUE,
+            expires_at TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
         """
@@ -1260,6 +1274,51 @@ def verify_password(password: str, stored_hash: str, salt: str) -> bool:
     return hash_password(password, salt) == stored_hash
 
 
+def sendgrid_configured() -> bool:
+    return bool(os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDER_EMAIL"))
+
+
+def send_password_reset_email(to_email: str, reset_link: str) -> None:
+    if not sendgrid_configured():
+        return
+    try:
+        from sendgrid import SendGridAPIClient
+        from sendgrid.helpers.mail import Mail
+
+        body = (
+            "A password reset was requested for your GearGrid account.\n\n"
+            "If you did not request this, you can safely ignore this email.\n\n"
+            f"Reset your password using this link (valid for 1 hour):\n{reset_link}\n"
+        )
+        message = Mail(
+            from_email=os.environ.get("SENDER_EMAIL"),
+            to_emails=to_email,
+            subject="Password Reset Request - GearGrid",
+            plain_text_content=body,
+        )
+        SendGridAPIClient(os.environ.get("SENDGRID_API_KEY")).send(message)
+    except Exception:
+        logger.exception("Failed to send password reset email to %s", to_email)
+
+
+def fetch_reset_token_row(cursor: sqlite3.Cursor, token: str) -> sqlite3.Row | None:
+    cursor.execute(
+        "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token=?",
+        (token,),
+    )
+    return cursor.fetchone()
+
+
+def reset_token_error_message(row: sqlite3.Row | None) -> str | None:
+    if not row:
+        return "This reset link is invalid or has expired. Please request a new one."
+    if row["used"]:
+        return "This reset link has already been used. Please request a new one."
+    if datetime.utcnow() >= datetime.fromisoformat(row["expires_at"]):
+        return "This reset link has expired. Please request a new one."
+    return None
+
+
 def create_session(response: RedirectResponse, user_id: int) -> None:
     conn = get_db()
     cursor = conn.cursor()
@@ -1738,7 +1797,7 @@ def forgot_password_submit(email: str = Form(...)):
     clean_email = email.strip().lower()
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, company_id FROM users WHERE email=?", (clean_email,))
+    cursor.execute("SELECT id, company_id, email FROM users WHERE email=?", (clean_email,))
     user = cursor.fetchone()
     if user:
         cursor.execute("SELECT id FROM password_reset_requests WHERE user_id=?", (user["id"],))
@@ -1748,9 +1807,64 @@ def forgot_password_submit(email: str = Form(...)):
                 "INSERT INTO password_reset_requests (user_id, company_id, requested_at) VALUES (?, ?, ?)",
                 (user["id"], user["company_id"], datetime.utcnow().isoformat()),
             )
-            conn.commit()
+        if sendgrid_configured():
+            token = secrets.token_urlsafe(32)
+            expires_at = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+            cursor.execute(
+                "INSERT INTO password_reset_tokens (user_id, token, expires_at, used) VALUES (?, ?, ?, 0)",
+                (user["id"], token, expires_at),
+            )
+            send_password_reset_email(user["email"], f"{BASE_URL}/reset-password/{token}")
+        conn.commit()
     conn.close()
     return RedirectResponse(url="/forgot-password?submitted=1", status_code=303)
+
+
+@app.get("/reset-password/{token}", response_class=HTMLResponse)
+def reset_password_page(request: Request, token: str):
+    conn = get_db()
+    cursor = conn.cursor()
+    row = fetch_reset_token_row(cursor, token)
+    conn.close()
+    error = reset_token_error_message(row)
+    return templates.TemplateResponse(
+        request=request,
+        name="reset_password.html",
+        context={"title": "Reset Password", "error": error, "token": None if error else token},
+    )
+
+
+@app.post("/reset-password/{token}")
+def reset_password_submit(request: Request, token: str, password: str = Form(...), confirm_password: str = Form(...)):
+    conn = get_db()
+    cursor = conn.cursor()
+    row = fetch_reset_token_row(cursor, token)
+    error = reset_token_error_message(row)
+    if error:
+        conn.close()
+        return templates.TemplateResponse(
+            request=request,
+            name="reset_password.html",
+            context={"title": "Reset Password", "error": error, "token": None},
+        )
+    if len(password) < 8:
+        conn.close()
+        return RedirectResponse(url=f"/reset-password/{token}?error=Password%20must%20be%20at%20least%208%20characters", status_code=303)
+    if password != confirm_password:
+        conn.close()
+        return RedirectResponse(url=f"/reset-password/{token}?error=Passwords%20do%20not%20match", status_code=303)
+    cursor.execute(
+        "UPDATE users SET password_hash=?, password_salt='bcrypt', must_change_password=0 WHERE id=?",
+        (hash_password(password, "bcrypt"), row["user_id"]),
+    )
+    cursor.execute("UPDATE password_reset_tokens SET used=1 WHERE id=?", (row["id"],))
+    cursor.execute("DELETE FROM password_reset_requests WHERE user_id=?", (row["user_id"],))
+    conn.commit()
+    conn.close()
+    return RedirectResponse(
+        url="/login?success=Password%20reset%20successfully.%20Please%20log%20in.",
+        status_code=303,
+    )
 
 
 @app.post("/login")
