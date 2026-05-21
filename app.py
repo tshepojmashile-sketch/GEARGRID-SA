@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import requests
 import secrets
 import sqlite3
 import tempfile
@@ -1278,32 +1279,36 @@ def sendgrid_configured() -> bool:
     return bool(os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDER_EMAIL"))
 
 
-def send_password_reset_email(to_email: str, reset_link: str) -> None:
-    if not sendgrid_configured():
-        return
-    sender_email = os.environ.get("SENDER_EMAIL")
-    try:
-        from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail
-
-        body = (
-            "A password reset was requested for your GearGrid account.\n\n"
-            "If you did not request this, you can safely ignore this email.\n\n"
-            f"Reset your password using this link (valid for 1 hour):\n{reset_link}\n"
-        )
-        message = Mail(
-            from_email=sender_email,
-            to_emails=to_email,
-            subject="Password Reset Request - GearGrid",
-            plain_text_content=body,
-        )
-        print(f"Attempting to send email FROM: {sender_email} TO: {to_email}")
-        response = SendGridAPIClient(os.environ.get("SENDGRID_API_KEY")).send(message)
-        print(f"SendGrid response status: {response.status_code}")
-        print(f"SendGrid response body: {response.body}")
-    except Exception as e:
-        print(f"SendGrid error: {str(e)}")
-        logger.exception("Failed to send password reset email to %s", to_email)
+def send_password_reset_email(to_email: str, reset_link: str) -> bool:
+    api_key = os.environ.get("SENDGRID_API_KEY")
+    sender = os.environ.get("SENDER_EMAIL")
+    if not api_key or not sender:
+        return False
+    response = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "personalizations": [{"to": [{"email": to_email}]}],
+            "from": {"email": sender},
+            "subject": "Password Reset - GearGrid",
+            "content": [
+                {
+                    "type": "text/plain",
+                    "value": (
+                        f"Click this link to reset your password: {reset_link}\n\n"
+                        "This link expires in 1 hour.\n\n"
+                        "If you did not request this, ignore this email."
+                    ),
+                }
+            ],
+        },
+        timeout=30,
+    )
+    print(f"SENDGRID RESPONSE: {response.status_code} {response.text}", flush=True)
+    return response.status_code == 202
 
 
 def fetch_reset_token_row(cursor: sqlite3.Cursor, token: str) -> sqlite3.Row | None:
@@ -1799,10 +1804,13 @@ def forgot_password_page(request: Request):
 
 @app.post("/forgot-password")
 def forgot_password_submit(email: str = Form(...)):
-    clean_email = email.strip().lower()
+    submitted_email = email.strip().lower()
+    logging.warning(
+        f"Forgot password triggered for email: {submitted_email}, SendGrid configured: {bool(os.environ.get('SENDGRID_API_KEY'))}"
+    )
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("SELECT id, company_id, email FROM users WHERE email=?", (clean_email,))
+    cursor.execute("SELECT id, company_id, email FROM users WHERE email=?", (submitted_email,))
     user = cursor.fetchone()
     if user:
         cursor.execute("SELECT id FROM password_reset_requests WHERE user_id=?", (user["id"],))
