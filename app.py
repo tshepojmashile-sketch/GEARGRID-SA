@@ -1831,12 +1831,17 @@ def forgot_password_submit(email: str = Form(...)):
             )
         if sendgrid_configured():
             token = secrets.token_urlsafe(32)
-            expires_at = (datetime.utcnow() + timedelta(hours=1)).isoformat()
-            cursor.execute(
-                "INSERT INTO password_reset_tokens (user_id, token, expires_at, used) VALUES (?, ?, ?, 0)",
-                (user["id"], token, expires_at),
-            )
-            send_password_reset_email(user["email"], f"{BASE_URL}/reset-password/{token}")
+            expires_at = (datetime.now() + timedelta(hours=1)).isoformat()
+            reset_link = f"{BASE_URL}/reset-password/{token}"
+            try:
+                cursor.execute(
+                    "INSERT INTO password_reset_tokens (user_id, token, expires_at, used) VALUES (?, ?, ?, 0)",
+                    (user["id"], token, expires_at),
+                )
+            except Exception as e:
+                print(f"FORGOT PASSWORD ERROR: {str(e)}", flush=True)
+            email_sent = send_password_reset_email(user["email"], reset_link)
+            print(f"EMAIL SENT RESULT: {email_sent}", flush=True)
         conn.commit()
     conn.close()
     return RedirectResponse(url="/forgot-password?submitted=1", status_code=303)
