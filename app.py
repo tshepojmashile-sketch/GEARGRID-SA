@@ -1279,36 +1279,45 @@ def sendgrid_configured() -> bool:
     return bool(os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDER_EMAIL"))
 
 
-def send_password_reset_email(to_email: str, reset_link: str) -> bool:
+def send_password_reset_email(to_email, reset_link):
     api_key = os.environ.get("SENDGRID_API_KEY")
     sender = os.environ.get("SENDER_EMAIL")
+    print(f"SENDGRID KEY EXISTS: {bool(api_key)}", flush=True)
+    print(f"SENDGRID KEY LENGTH: {len(api_key) if api_key else 0}", flush=True)
+    print(f"SENDER: {sender}", flush=True)
+    print(f"RECIPIENT: {to_email}", flush=True)
     if not api_key or not sender:
+        print("SENDGRID NOT CONFIGURED - SKIPPING", flush=True)
         return False
-    response = requests.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "personalizations": [{"to": [{"email": to_email}]}],
-            "from": {"email": sender},
-            "subject": "Password Reset - GearGrid",
-            "content": [
-                {
-                    "type": "text/plain",
-                    "value": (
-                        f"Click this link to reset your password: {reset_link}\n\n"
-                        "This link expires in 1 hour.\n\n"
-                        "If you did not request this, ignore this email."
-                    ),
-                }
-            ],
-        },
-        timeout=30,
-    )
-    print(f"SENDGRID RESPONSE: {response.status_code} {response.text}", flush=True)
-    return response.status_code == 202
+    try:
+        response = requests.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": sender},
+                "subject": "Password Reset - GearGrid",
+                "content": [
+                    {
+                        "type": "text/plain",
+                        "value": (
+                            f"Click this link to reset your password:\n\n{reset_link}\n\n"
+                            "This link expires in 1 hour."
+                        ),
+                    }
+                ],
+            },
+            timeout=10,
+        )
+        print(f"SENDGRID STATUS: {response.status_code}", flush=True)
+        print(f"SENDGRID BODY: {response.text}", flush=True)
+        return response.status_code == 202
+    except Exception as e:
+        print(f"SENDGRID EXCEPTION: {str(e)}", flush=True)
+        return False
 
 
 def fetch_reset_token_row(cursor: sqlite3.Cursor, token: str) -> sqlite3.Row | None:
