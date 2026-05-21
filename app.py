@@ -1281,6 +1281,7 @@ def sendgrid_configured() -> bool:
 def send_password_reset_email(to_email: str, reset_link: str) -> None:
     if not sendgrid_configured():
         return
+    sender_email = os.environ.get("SENDER_EMAIL")
     try:
         from sendgrid import SendGridAPIClient
         from sendgrid.helpers.mail import Mail
@@ -1291,13 +1292,17 @@ def send_password_reset_email(to_email: str, reset_link: str) -> None:
             f"Reset your password using this link (valid for 1 hour):\n{reset_link}\n"
         )
         message = Mail(
-            from_email=os.environ.get("SENDER_EMAIL"),
+            from_email=sender_email,
             to_emails=to_email,
             subject="Password Reset Request - GearGrid",
             plain_text_content=body,
         )
-        SendGridAPIClient(os.environ.get("SENDGRID_API_KEY")).send(message)
-    except Exception:
+        print(f"Attempting to send email FROM: {sender_email} TO: {to_email}")
+        response = SendGridAPIClient(os.environ.get("SENDGRID_API_KEY")).send(message)
+        print(f"SendGrid response status: {response.status_code}")
+        print(f"SendGrid response body: {response.body}")
+    except Exception as e:
+        print(f"SendGrid error: {str(e)}")
         logger.exception("Failed to send password reset email to %s", to_email)
 
 
