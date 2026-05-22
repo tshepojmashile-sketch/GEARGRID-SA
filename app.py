@@ -99,6 +99,23 @@ def compute_financial_totals(subtotal, discount_percent, vat_enabled, vat_percen
 
 def init_db() -> None:
     with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'sessions')"
+        )
+        if cur.fetchone()[0]:
+            cur.execute("""
+                ALTER TABLE sessions
+                DROP CONSTRAINT IF EXISTS sessions_user_id_fkey;
+            """)
+            cur.execute("""
+                ALTER TABLE sessions
+                ADD CONSTRAINT sessions_user_id_fkey
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+            """)
+            cur.execute("DELETE FROM sessions WHERE user_id NOT IN (SELECT id FROM users)")
+
+    with get_db() as conn:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cursor.execute(
@@ -140,7 +157,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 csrf_token TEXT,
                 expires_at TEXT NOT NULL,
-                FOREIGN KEY(user_id) REFERENCES users(id)
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
         )
