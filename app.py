@@ -7,8 +7,11 @@ import logging
 import os
 import requests
 import secrets
-import sqlite3
 import tempfile
+from contextlib import contextmanager
+
+import psycopg2
+import psycopg2.extras
 from io import BytesIO
 from xml.sax.saxutils import escape
 
@@ -28,7 +31,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from starlette.background import BackgroundTask
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "rental.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
 SESSION_DAYS = 14
 SESSION_SECURE_COOKIE = os.getenv("SESSION_SECURE_COOKIE", "0") == "1"
 BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -42,20 +45,39 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+@contextmanager
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = False
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
-def has_column(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
-    cursor.execute(f"PRAGMA table_info({table})")
-    cols = [row["name"] for row in cursor.fetchall()]
-    return column in cols
+def has_column(cursor, table: str, column: str) -> bool:
+    cursor.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = %s AND column_name = %s
+        """,
+        (table, column),
+    )
+    return cursor.fetchone() is not None
 
 
-def table_exists(cursor: sqlite3.Cursor, table: str) -> bool:
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+def table_exists(cursor, table: str) -> bool:
+    cursor.execute(
+        """
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = %s
+        """,
+        (table,),
+    )
     return cursor.fetchone() is not None
 
 
@@ -76,469 +98,469 @@ def compute_financial_totals(subtotal, discount_percent, vat_enabled, vat_percen
 
 
 def init_db() -> None:
-    conn = get_db()
-    cursor = conn.cursor()
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS companies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS companies (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            full_name TEXT NOT NULL,
-            email TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            password_salt TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'admin',
-            must_change_password INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(company_id) REFERENCES companies(id)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                full_name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                password_salt TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'admin',
+                must_change_password INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            )
+            """
         )
-        """
-    )
-    if not has_column(cursor, "users", "role"):
-        cursor.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'")
-    if not has_column(cursor, "users", "must_change_password"):
-        cursor.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
-    cursor.execute("UPDATE users SET role='admin' WHERE role IS NULL OR role=''")
-    cursor.execute("UPDATE users SET must_change_password=0 WHERE must_change_password IS NULL")
+        if not has_column(cursor, "users", "role"):
+            cursor.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'admin'")
+        if not has_column(cursor, "users", "must_change_password"):
+            cursor.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("UPDATE users SET role='admin' WHERE role IS NULL OR role=''")
+        cursor.execute("UPDATE users SET must_change_password=0 WHERE must_change_password IS NULL")
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sessions (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            csrf_token TEXT,
-            expires_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                csrf_token TEXT,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
         )
-        """
-    )
-    if not has_column(cursor, "sessions", "csrf_token"):
-        cursor.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT")
+        if not has_column(cursor, "sessions", "csrf_token"):
+            cursor.execute("ALTER TABLE sessions ADD COLUMN csrf_token TEXT")
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS password_reset_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            company_id INTEGER NOT NULL,
-            requested_at TEXT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_requests (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                company_id INTEGER NOT NULL,
+                requested_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
         )
-        """
-    )
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS password_reset_tokens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            token TEXT NOT NULL UNIQUE,
-            expires_at TEXT NOT NULL,
-            used INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(user_id) REFERENCES users(id)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                token TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+            """
         )
-        """
-    )
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS equipment (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT,
-            status TEXT,
-            rented_to TEXT,
-            due_date TEXT,
-            price INTEGER,
-            prep_status TEXT DEFAULT 'pending'
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equipment (
+                id SERIAL PRIMARY KEY,
+                name TEXT,
+                status TEXT,
+                rented_to TEXT,
+                due_date TEXT,
+                price INTEGER,
+                prep_status TEXT DEFAULT 'pending'
+            )
+            """
         )
-        """
-    )
-    if not has_column(cursor, "equipment", "prep_status"):
-        cursor.execute("ALTER TABLE equipment ADD COLUMN prep_status TEXT DEFAULT 'pending'")
-    if not has_column(cursor, "equipment", "quantity"):
-        cursor.execute("ALTER TABLE equipment ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1")
-    if not has_column(cursor, "equipment", "quantity_rented"):
-        cursor.execute("ALTER TABLE equipment ADD COLUMN quantity_rented INTEGER NOT NULL DEFAULT 0")
-    cursor.execute("UPDATE equipment SET quantity=1 WHERE quantity IS NULL OR quantity < 1")
-    cursor.execute("UPDATE equipment SET quantity_rented=0 WHERE quantity_rented IS NULL")
-    cursor.execute("UPDATE equipment SET quantity_rented=1 WHERE status='rented' AND quantity_rented=0")
-    cursor.execute("UPDATE equipment SET quantity = MAX(quantity, quantity_rented) WHERE quantity < quantity_rented")
+        if not has_column(cursor, "equipment", "prep_status"):
+            cursor.execute("ALTER TABLE equipment ADD COLUMN prep_status TEXT DEFAULT 'pending'")
+        if not has_column(cursor, "equipment", "quantity"):
+            cursor.execute("ALTER TABLE equipment ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1")
+        if not has_column(cursor, "equipment", "quantity_rented"):
+            cursor.execute("ALTER TABLE equipment ADD COLUMN quantity_rented INTEGER NOT NULL DEFAULT 0")
+        cursor.execute("UPDATE equipment SET quantity=1 WHERE quantity IS NULL OR quantity < 1")
+        cursor.execute("UPDATE equipment SET quantity_rented=0 WHERE quantity_rented IS NULL")
+        cursor.execute("UPDATE equipment SET quantity_rented=1 WHERE status='rented' AND quantity_rented=0")
+        cursor.execute("UPDATE equipment SET quantity = GREATEST(quantity, quantity_rented) WHERE quantity < quantity_rented")
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS clients (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS clients (
+                id SERIAL PRIMARY KEY,
+                name TEXT
+            )
+            """
         )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS rental_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            equipment_name TEXT,
-            client TEXT,
-            date_rented TEXT,
-            due_date TEXT,
-            date_returned TEXT
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rental_history (
+                id SERIAL PRIMARY KEY,
+                equipment_name TEXT,
+                client TEXT,
+                date_rented TEXT,
+                due_date TEXT,
+                date_returned TEXT
+            )
+            """
         )
-        """
-    )
 
-    for table in ["equipment", "clients", "rental_history"]:
-        if not has_column(cursor, table, "company_id"):
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN company_id INTEGER DEFAULT 1")
-        cursor.execute(f"UPDATE {table} SET company_id=1 WHERE company_id IS NULL")
+        for table in ["equipment", "clients", "rental_history"]:
+            if not has_column(cursor, table, "company_id"):
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN company_id INTEGER DEFAULT 1")
+            cursor.execute(f"UPDATE {table} SET company_id=1 WHERE company_id IS NULL")
 
-    for col, ddl in (
-        ("contact_person", "ALTER TABLE clients ADD COLUMN contact_person TEXT"),
-        ("phone", "ALTER TABLE clients ADD COLUMN phone TEXT"),
-        ("email", "ALTER TABLE clients ADD COLUMN email TEXT"),
-        ("address", "ALTER TABLE clients ADD COLUMN address TEXT"),
-        ("vat_number", "ALTER TABLE clients ADD COLUMN vat_number TEXT"),
-    ):
-        if not has_column(cursor, "clients", col):
-            cursor.execute(ddl)
+        for col, ddl in (
+            ("contact_person", "ALTER TABLE clients ADD COLUMN contact_person TEXT"),
+            ("phone", "ALTER TABLE clients ADD COLUMN phone TEXT"),
+            ("email", "ALTER TABLE clients ADD COLUMN email TEXT"),
+            ("address", "ALTER TABLE clients ADD COLUMN address TEXT"),
+            ("vat_number", "ALTER TABLE clients ADD COLUMN vat_number TEXT"),
+        ):
+            if not has_column(cursor, "clients", col):
+                cursor.execute(ddl)
 
-    if not has_column(cursor, "rental_history", "units"):
-        cursor.execute("ALTER TABLE rental_history ADD COLUMN units INTEGER NOT NULL DEFAULT 1")
+        if not has_column(cursor, "rental_history", "units"):
+            cursor.execute("ALTER TABLE rental_history ADD COLUMN units INTEGER NOT NULL DEFAULT 1")
 
-    if table_exists(cursor, "company_settings") and not has_column(cursor, "company_settings", "company_id"):
-        cursor.execute("ALTER TABLE company_settings RENAME TO company_settings_legacy")
+        if table_exists(cursor, "company_settings") and not has_column(cursor, "company_settings", "company_id"):
+            cursor.execute("ALTER TABLE company_settings RENAME TO company_settings_legacy")
 
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS company_settings (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL UNIQUE,
-            company_name TEXT NOT NULL,
-            tagline TEXT,
-            email TEXT,
-            phone TEXT,
-            address TEXT,
-            vat_number TEXT,
-            quote_footer TEXT,
-            FOREIGN KEY(company_id) REFERENCES companies(id)
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS company_settings (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL UNIQUE,
+                company_name TEXT NOT NULL,
+                tagline TEXT,
+                email TEXT,
+                phone TEXT,
+                address TEXT,
+                vat_number TEXT,
+                quote_footer TEXT,
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            )
+            """
         )
-        """
-    )
-    if table_exists(cursor, "company_settings_legacy"):
-        cursor.execute("SELECT * FROM company_settings_legacy LIMIT 1")
-        legacy = cursor.fetchone()
-        if legacy:
+        if table_exists(cursor, "company_settings_legacy"):
+            cursor.execute("SELECT * FROM company_settings_legacy LIMIT 1")
+            legacy = cursor.fetchone()
+            if legacy:
+                cursor.execute(
+                    """
+                    INSERT INTO company_settings
+                    (company_id, company_name, tagline, email, phone, address, vat_number, quote_footer)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (company_id) DO NOTHING
+                    """,
+                    (
+                        1,
+                        legacy["company_name"],
+                        legacy["tagline"],
+                        legacy["email"],
+                        legacy["phone"],
+                        legacy["address"],
+                        legacy["vat_number"],
+                        legacy["quote_footer"],
+                    ),
+                )
+            cursor.execute("DROP TABLE company_settings_legacy")
+
+        cursor.execute("INSERT INTO companies (id, name, created_at) VALUES (1, %s, %s) ON CONFLICT (id) DO NOTHING", ("Default Company", datetime.utcnow().isoformat()))
+        cursor.execute(
+            """
+            INSERT INTO company_settings
+            (company_id, company_name, tagline, email, phone, address, vat_number, quote_footer)
+            VALUES
+            (1, 'AVMAN RENTALS', 'Professional AV Equipment Rentals', 'info@avman.co.za', '+27 00 000 0000', '', '', 'Thank you for your business.')
+            ON CONFLICT (company_id) DO NOTHING
+            """
+        )
+
+        (BASE_DIR / "static" / "logos").mkdir(parents=True, exist_ok=True)
+
+        for col, ddl in (
+            ("tagline", "ALTER TABLE companies ADD COLUMN tagline TEXT"),
+            ("email", "ALTER TABLE companies ADD COLUMN email TEXT"),
+            ("phone", "ALTER TABLE companies ADD COLUMN phone TEXT"),
+            ("address", "ALTER TABLE companies ADD COLUMN address TEXT"),
+            ("vat_number", "ALTER TABLE companies ADD COLUMN vat_number TEXT"),
+            ("vat_percent", "ALTER TABLE companies ADD COLUMN vat_percent NUMERIC NOT NULL DEFAULT 15"),
+            ("vat_enabled", "ALTER TABLE companies ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 0"),
+            ("default_discount_percent", "ALTER TABLE companies ADD COLUMN default_discount_percent NUMERIC NOT NULL DEFAULT 0"),
+            ("bank_name", "ALTER TABLE companies ADD COLUMN bank_name TEXT"),
+            ("bank_account_holder", "ALTER TABLE companies ADD COLUMN bank_account_holder TEXT"),
+            ("bank_account_number", "ALTER TABLE companies ADD COLUMN bank_account_number TEXT"),
+            ("bank_account_type", "ALTER TABLE companies ADD COLUMN bank_account_type TEXT"),
+            ("bank_branch_code", "ALTER TABLE companies ADD COLUMN bank_branch_code TEXT"),
+            ("bank_reference", "ALTER TABLE companies ADD COLUMN bank_reference TEXT"),
+            ("terms_and_conditions", "ALTER TABLE companies ADD COLUMN terms_and_conditions TEXT"),
+        ):
+            if not has_column(cursor, "companies", col):
+                cursor.execute(ddl)
+
+        cursor.execute(
+            """
+            UPDATE companies SET
+                tagline = COALESCE(tagline, (SELECT tagline FROM company_settings WHERE company_id = companies.id)),
+                email = COALESCE(email, (SELECT email FROM company_settings WHERE company_id = companies.id)),
+                phone = COALESCE(phone, (SELECT phone FROM company_settings WHERE company_id = companies.id)),
+                address = COALESCE(address, (SELECT address FROM company_settings WHERE company_id = companies.id)),
+                vat_number = COALESCE(vat_number, (SELECT vat_number FROM company_settings WHERE company_id = companies.id))
+            WHERE EXISTS (SELECT 1 FROM company_settings cs WHERE cs.company_id = companies.id)
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS quotes (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                quote_number TEXT NOT NULL,
+                client_name TEXT NOT NULL,
+                quote_date TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                line_items_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                UNIQUE(company_id, quote_number)
+            )
+            """
+        )
+        for qcol, qddl in (
+            ("subtotal", "ALTER TABLE quotes ADD COLUMN subtotal INTEGER"),
+            ("discount_percent", "ALTER TABLE quotes ADD COLUMN discount_percent NUMERIC NOT NULL DEFAULT 0"),
+            ("discount_amount", "ALTER TABLE quotes ADD COLUMN discount_amount INTEGER NOT NULL DEFAULT 0"),
+            ("vat_enabled", "ALTER TABLE quotes ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 0"),
+            ("vat_percent", "ALTER TABLE quotes ADD COLUMN vat_percent NUMERIC NOT NULL DEFAULT 15"),
+            ("vat_amount", "ALTER TABLE quotes ADD COLUMN vat_amount INTEGER NOT NULL DEFAULT 0"),
+            ("grand_total", "ALTER TABLE quotes ADD COLUMN grand_total INTEGER"),
+            ("job_name", "ALTER TABLE quotes ADD COLUMN job_name TEXT"),
+            ("site_location", "ALTER TABLE quotes ADD COLUMN site_location TEXT"),
+            ("start_date", "ALTER TABLE quotes ADD COLUMN start_date TEXT"),
+            ("end_date", "ALTER TABLE quotes ADD COLUMN end_date TEXT"),
+            ("special_notes", "ALTER TABLE quotes ADD COLUMN special_notes TEXT"),
+            ("quote_terms", "ALTER TABLE quotes ADD COLUMN quote_terms TEXT"),
+        ):
+            if not has_column(cursor, "quotes", qcol):
+                cursor.execute(qddl)
+        if has_column(cursor, "quotes", "subtotal"):
             cursor.execute(
                 """
-                INSERT OR IGNORE INTO company_settings
-                (company_id, company_name, tagline, email, phone, address, vat_number, quote_footer)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    1,
-                    legacy["company_name"],
-                    legacy["tagline"],
-                    legacy["email"],
-                    legacy["phone"],
-                    legacy["address"],
-                    legacy["vat_number"],
-                    legacy["quote_footer"],
-                ),
+                UPDATE quotes
+                SET subtotal = COALESCE(subtotal, total),
+                    discount_amount = COALESCE(discount_amount, 0),
+                    vat_amount = COALESCE(vat_amount, 0),
+                    grand_total = COALESCE(grand_total, total)
+                WHERE grand_total IS NULL OR subtotal IS NULL
+                """
             )
-        cursor.execute("DROP TABLE company_settings_legacy")
 
-    cursor.execute("INSERT OR IGNORE INTO companies (id, name, created_at) VALUES (1, ?, ?)", ("Default Company", datetime.utcnow().isoformat()))
-    cursor.execute(
-        """
-        INSERT OR IGNORE INTO company_settings
-        (company_id, company_name, tagline, email, phone, address, vat_number, quote_footer)
-        VALUES
-        (1, 'AVMAN RENTALS', 'Professional AV Equipment Rentals', 'info@avman.co.za', '+27 00 000 0000', '', '', 'Thank you for your business.')
-        """
-    )
-
-    (BASE_DIR / "static" / "logos").mkdir(parents=True, exist_ok=True)
-
-    for col, ddl in (
-        ("tagline", "ALTER TABLE companies ADD COLUMN tagline TEXT"),
-        ("email", "ALTER TABLE companies ADD COLUMN email TEXT"),
-        ("phone", "ALTER TABLE companies ADD COLUMN phone TEXT"),
-        ("address", "ALTER TABLE companies ADD COLUMN address TEXT"),
-        ("vat_number", "ALTER TABLE companies ADD COLUMN vat_number TEXT"),
-        ("vat_percent", "ALTER TABLE companies ADD COLUMN vat_percent REAL NOT NULL DEFAULT 15"),
-        ("vat_enabled", "ALTER TABLE companies ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 0"),
-        ("default_discount_percent", "ALTER TABLE companies ADD COLUMN default_discount_percent REAL NOT NULL DEFAULT 0"),
-        ("bank_name", "ALTER TABLE companies ADD COLUMN bank_name TEXT"),
-        ("bank_account_holder", "ALTER TABLE companies ADD COLUMN bank_account_holder TEXT"),
-        ("bank_account_number", "ALTER TABLE companies ADD COLUMN bank_account_number TEXT"),
-        ("bank_account_type", "ALTER TABLE companies ADD COLUMN bank_account_type TEXT"),
-        ("bank_branch_code", "ALTER TABLE companies ADD COLUMN bank_branch_code TEXT"),
-        ("bank_reference", "ALTER TABLE companies ADD COLUMN bank_reference TEXT"),
-        ("terms_and_conditions", "ALTER TABLE companies ADD COLUMN terms_and_conditions TEXT"),
-    ):
-        if not has_column(cursor, "companies", col):
-            cursor.execute(ddl)
-
-    cursor.execute(
-        """
-        UPDATE companies SET
-            tagline = COALESCE(tagline, (SELECT tagline FROM company_settings WHERE company_id = companies.id)),
-            email = COALESCE(email, (SELECT email FROM company_settings WHERE company_id = companies.id)),
-            phone = COALESCE(phone, (SELECT phone FROM company_settings WHERE company_id = companies.id)),
-            address = COALESCE(address, (SELECT address FROM company_settings WHERE company_id = companies.id)),
-            vat_number = COALESCE(vat_number, (SELECT vat_number FROM company_settings WHERE company_id = companies.id))
-        WHERE EXISTS (SELECT 1 FROM company_settings cs WHERE cs.company_id = companies.id)
-        """
-    )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS quotes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            quote_number TEXT NOT NULL,
-            client_name TEXT NOT NULL,
-            quote_date TEXT NOT NULL,
-            total INTEGER NOT NULL,
-            line_items_json TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(company_id) REFERENCES companies(id),
-            UNIQUE(company_id, quote_number)
-        )
-        """
-    )
-    for qcol, qddl in (
-        ("subtotal", "ALTER TABLE quotes ADD COLUMN subtotal INTEGER"),
-        ("discount_percent", "ALTER TABLE quotes ADD COLUMN discount_percent REAL NOT NULL DEFAULT 0"),
-        ("discount_amount", "ALTER TABLE quotes ADD COLUMN discount_amount INTEGER NOT NULL DEFAULT 0"),
-        ("vat_enabled", "ALTER TABLE quotes ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 0"),
-        ("vat_percent", "ALTER TABLE quotes ADD COLUMN vat_percent REAL NOT NULL DEFAULT 15"),
-        ("vat_amount", "ALTER TABLE quotes ADD COLUMN vat_amount INTEGER NOT NULL DEFAULT 0"),
-        ("grand_total", "ALTER TABLE quotes ADD COLUMN grand_total INTEGER"),
-        ("job_name", "ALTER TABLE quotes ADD COLUMN job_name TEXT"),
-        ("site_location", "ALTER TABLE quotes ADD COLUMN site_location TEXT"),
-        ("start_date", "ALTER TABLE quotes ADD COLUMN start_date TEXT"),
-        ("end_date", "ALTER TABLE quotes ADD COLUMN end_date TEXT"),
-        ("special_notes", "ALTER TABLE quotes ADD COLUMN special_notes TEXT"),
-        ("quote_terms", "ALTER TABLE quotes ADD COLUMN quote_terms TEXT"),
-    ):
-        if not has_column(cursor, "quotes", qcol):
-            cursor.execute(qddl)
-    if has_column(cursor, "quotes", "subtotal"):
         cursor.execute(
             """
-            UPDATE quotes
-            SET subtotal = COALESCE(subtotal, total),
-                discount_amount = COALESCE(discount_amount, 0),
-                vat_amount = COALESCE(vat_amount, 0),
-                grand_total = COALESCE(grand_total, total)
-            WHERE grand_total IS NULL OR subtotal IS NULL
-            """
-        )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS invoices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            invoice_number TEXT NOT NULL,
-            quote_id INTEGER,
-            client_name TEXT NOT NULL,
-            line_items_json TEXT NOT NULL,
-            total INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            due_date TEXT NOT NULL,
-            payment_status TEXT NOT NULL,
-            FOREIGN KEY(company_id) REFERENCES companies(id),
-            FOREIGN KEY(quote_id) REFERENCES quotes(id),
-            UNIQUE(company_id, invoice_number)
-        )
-        """
-    )
-    for icol, iddl in (
-        ("subtotal", "ALTER TABLE invoices ADD COLUMN subtotal INTEGER"),
-        ("discount_percent", "ALTER TABLE invoices ADD COLUMN discount_percent REAL NOT NULL DEFAULT 0"),
-        ("discount_amount", "ALTER TABLE invoices ADD COLUMN discount_amount INTEGER NOT NULL DEFAULT 0"),
-        ("vat_enabled", "ALTER TABLE invoices ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 0"),
-        ("vat_percent", "ALTER TABLE invoices ADD COLUMN vat_percent REAL NOT NULL DEFAULT 15"),
-        ("vat_amount", "ALTER TABLE invoices ADD COLUMN vat_amount INTEGER NOT NULL DEFAULT 0"),
-        ("grand_total", "ALTER TABLE invoices ADD COLUMN grand_total INTEGER"),
-    ):
-        if not has_column(cursor, "invoices", icol):
-            cursor.execute(iddl)
-    if has_column(cursor, "invoices", "subtotal"):
-        cursor.execute(
-            """
-            UPDATE invoices
-            SET subtotal = COALESCE(subtotal, total),
-                discount_amount = COALESCE(discount_amount, 0),
-                vat_amount = COALESCE(vat_amount, 0),
-                grand_total = COALESCE(grand_total, total)
-            WHERE grand_total IS NULL OR subtotal IS NULL
-            """
-        )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS jobs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            quote_id INTEGER NOT NULL,
-            invoice_id INTEGER,
-            client_name TEXT NOT NULL,
-            job_date TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'upcoming',
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(company_id) REFERENCES companies(id),
-            FOREIGN KEY(quote_id) REFERENCES quotes(id),
-            FOREIGN KEY(invoice_id) REFERENCES invoices(id)
-        )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS job_prep_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            job_id INTEGER NOT NULL,
-            equipment_id INTEGER,
-            equipment_name TEXT NOT NULL,
-            quantity INTEGER NOT NULL DEFAULT 1,
-            packed INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(company_id) REFERENCES companies(id),
-            FOREIGN KEY(job_id) REFERENCES jobs(id)
-        )
-        """
-    )
-    if not has_column(cursor, "job_prep_items", "equipment_id"):
-        cursor.execute("ALTER TABLE job_prep_items ADD COLUMN equipment_id INTEGER")
-    if not has_column(cursor, "job_prep_items", "line_type"):
-        cursor.execute("ALTER TABLE job_prep_items ADD COLUMN line_type TEXT NOT NULL DEFAULT 'owned'")
-    if not has_column(cursor, "job_prep_items", "sub_rental_id"):
-        cursor.execute("ALTER TABLE job_prep_items ADD COLUMN sub_rental_id INTEGER")
-    if not has_column(cursor, "job_prep_items", "supplier_name"):
-        cursor.execute("ALTER TABLE job_prep_items ADD COLUMN supplier_name TEXT")
-    if not has_column(cursor, "job_prep_items", "received_from_supplier"):
-        cursor.execute("ALTER TABLE job_prep_items ADD COLUMN received_from_supplier INTEGER NOT NULL DEFAULT 0")
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sub_rentals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            supplier_name TEXT NOT NULL,
-            equipment_description TEXT NOT NULL,
-            quantity_total INTEGER NOT NULL,
-            quantity_available INTEGER NOT NULL,
-            cost_per_unit INTEGER NOT NULL DEFAULT 0,
-            notes TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY(company_id) REFERENCES companies(id)
-        )
-        """
-    )
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS sub_rental_usage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            sub_rental_id INTEGER NOT NULL,
-            job_id INTEGER NOT NULL,
-            units_used INTEGER NOT NULL,
-            show_on_quote INTEGER NOT NULL DEFAULT 0,
-            FOREIGN KEY(company_id) REFERENCES companies(id),
-            FOREIGN KEY(sub_rental_id) REFERENCES sub_rentals(id),
-            FOREIGN KEY(job_id) REFERENCES jobs(id)
-        )
-        """
-    )
-
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS job_status_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_id INTEGER NOT NULL,
-            job_id INTEGER NOT NULL,
-            old_status TEXT,
-            new_status TEXT NOT NULL,
-            changed_at TEXT NOT NULL,
-            changed_by_user_id INTEGER NOT NULL,
-            FOREIGN KEY(company_id) REFERENCES companies(id),
-            FOREIGN KEY(job_id) REFERENCES jobs(id),
-            FOREIGN KEY(changed_by_user_id) REFERENCES users(id)
-        )
-        """
-    )
-
-    if not table_exists(cursor, "invoice_payments"):
-        cursor.execute(
-            """
-            CREATE TABLE invoice_payments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+            CREATE TABLE IF NOT EXISTS invoices (
+                id SERIAL PRIMARY KEY,
                 company_id INTEGER NOT NULL,
-                invoice_id INTEGER NOT NULL,
-                amount INTEGER NOT NULL,
-                recorded_by_user_id INTEGER NOT NULL,
-                recorded_at TEXT NOT NULL,
+                invoice_number TEXT NOT NULL,
+                quote_id INTEGER,
+                client_name TEXT NOT NULL,
+                line_items_json TEXT NOT NULL,
+                total INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                payment_status TEXT NOT NULL,
                 FOREIGN KEY(company_id) REFERENCES companies(id),
-                FOREIGN KEY(invoice_id) REFERENCES invoices(id),
-                FOREIGN KEY(recorded_by_user_id) REFERENCES users(id)
+                FOREIGN KEY(quote_id) REFERENCES quotes(id),
+                UNIQUE(company_id, invoice_number)
             )
             """
         )
-    if table_exists(cursor, "invoices") and not has_column(cursor, "invoices", "amount_paid"):
-        cursor.execute("ALTER TABLE invoices ADD COLUMN amount_paid INTEGER NOT NULL DEFAULT 0")
-    if table_exists(cursor, "invoices") and has_column(cursor, "invoices", "amount_paid"):
-        cursor.execute("UPDATE invoices SET amount_paid=0 WHERE amount_paid IS NULL")
-        cursor.execute(
-            """
-            UPDATE invoices SET payment_status = CASE
-                WHEN COALESCE(amount_paid, 0) >= total THEN 'paid'
-                WHEN COALESCE(amount_paid, 0) > 0 THEN 'partial'
-                ELSE 'unpaid'
-            END
-            """
-        )
-    if table_exists(cursor, "company_settings") and not has_column(cursor, "company_settings", "company_logo_path"):
-        cursor.execute("ALTER TABLE company_settings ADD COLUMN company_logo_path TEXT")
-
-    if table_exists(cursor, "jobs"):
-        cursor.execute(
-            "UPDATE jobs SET status='upcoming' WHERE status IN ('pending', 'confirmed', 'in_progress', 'completed')"
-        )
-    if table_exists(cursor, "job_status_log"):
-        for old, new in (
-            ("pending", "upcoming"),
-            ("confirmed", "upcoming"),
-            ("in_progress", "active"),
-            ("completed", "done"),
+        for icol, iddl in (
+            ("subtotal", "ALTER TABLE invoices ADD COLUMN subtotal INTEGER"),
+            ("discount_percent", "ALTER TABLE invoices ADD COLUMN discount_percent NUMERIC NOT NULL DEFAULT 0"),
+            ("discount_amount", "ALTER TABLE invoices ADD COLUMN discount_amount INTEGER NOT NULL DEFAULT 0"),
+            ("vat_enabled", "ALTER TABLE invoices ADD COLUMN vat_enabled INTEGER NOT NULL DEFAULT 0"),
+            ("vat_percent", "ALTER TABLE invoices ADD COLUMN vat_percent NUMERIC NOT NULL DEFAULT 15"),
+            ("vat_amount", "ALTER TABLE invoices ADD COLUMN vat_amount INTEGER NOT NULL DEFAULT 0"),
+            ("grand_total", "ALTER TABLE invoices ADD COLUMN grand_total INTEGER"),
         ):
-            cursor.execute("UPDATE job_status_log SET old_status=? WHERE old_status=?", (new, old))
-            cursor.execute("UPDATE job_status_log SET new_status=? WHERE new_status=?", (new, old))
+            if not has_column(cursor, "invoices", icol):
+                cursor.execute(iddl)
+        if has_column(cursor, "invoices", "subtotal"):
+            cursor.execute(
+                """
+                UPDATE invoices
+                SET subtotal = COALESCE(subtotal, total),
+                    discount_amount = COALESCE(discount_amount, 0),
+                    vat_amount = COALESCE(vat_amount, 0),
+                    grand_total = COALESCE(grand_total, total)
+                WHERE grand_total IS NULL OR subtotal IS NULL
+                """
+            )
 
-    conn.commit()
-    conn.close()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                quote_id INTEGER NOT NULL,
+                invoice_id INTEGER,
+                client_name TEXT NOT NULL,
+                job_date TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'upcoming',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(quote_id) REFERENCES quotes(id),
+                FOREIGN KEY(invoice_id) REFERENCES invoices(id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_prep_items (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                equipment_id INTEGER,
+                equipment_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                packed INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
+            )
+            """
+        )
+        if not has_column(cursor, "job_prep_items", "equipment_id"):
+            cursor.execute("ALTER TABLE job_prep_items ADD COLUMN equipment_id INTEGER")
+        if not has_column(cursor, "job_prep_items", "line_type"):
+            cursor.execute("ALTER TABLE job_prep_items ADD COLUMN line_type TEXT NOT NULL DEFAULT 'owned'")
+        if not has_column(cursor, "job_prep_items", "sub_rental_id"):
+            cursor.execute("ALTER TABLE job_prep_items ADD COLUMN sub_rental_id INTEGER")
+        if not has_column(cursor, "job_prep_items", "supplier_name"):
+            cursor.execute("ALTER TABLE job_prep_items ADD COLUMN supplier_name TEXT")
+        if not has_column(cursor, "job_prep_items", "received_from_supplier"):
+            cursor.execute("ALTER TABLE job_prep_items ADD COLUMN received_from_supplier INTEGER NOT NULL DEFAULT 0")
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sub_rentals (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                supplier_name TEXT NOT NULL,
+                equipment_description TEXT NOT NULL,
+                quantity_total INTEGER NOT NULL,
+                quantity_available INTEGER NOT NULL,
+                cost_per_unit INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sub_rental_usage (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                sub_rental_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                units_used INTEGER NOT NULL,
+                show_on_quote INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(sub_rental_id) REFERENCES sub_rentals(id),
+                FOREIGN KEY(job_id) REFERENCES jobs(id)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_status_log (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                old_status TEXT,
+                new_status TEXT NOT NULL,
+                changed_at TEXT NOT NULL,
+                changed_by_user_id INTEGER NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(job_id) REFERENCES jobs(id),
+                FOREIGN KEY(changed_by_user_id) REFERENCES users(id)
+            )
+            """
+        )
+
+        if not table_exists(cursor, "invoice_payments"):
+            cursor.execute(
+                """
+                CREATE TABLE invoice_payments (
+                    id SERIAL PRIMARY KEY,
+                    company_id INTEGER NOT NULL,
+                    invoice_id INTEGER NOT NULL,
+                    amount INTEGER NOT NULL,
+                    recorded_by_user_id INTEGER NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    FOREIGN KEY(company_id) REFERENCES companies(id),
+                    FOREIGN KEY(invoice_id) REFERENCES invoices(id),
+                    FOREIGN KEY(recorded_by_user_id) REFERENCES users(id)
+                )
+                """
+            )
+        if table_exists(cursor, "invoices") and not has_column(cursor, "invoices", "amount_paid"):
+            cursor.execute("ALTER TABLE invoices ADD COLUMN amount_paid INTEGER NOT NULL DEFAULT 0")
+        if table_exists(cursor, "invoices") and has_column(cursor, "invoices", "amount_paid"):
+            cursor.execute("UPDATE invoices SET amount_paid=0 WHERE amount_paid IS NULL")
+            cursor.execute(
+                """
+                UPDATE invoices SET payment_status = CASE
+                    WHEN COALESCE(amount_paid, 0) >= total THEN 'paid'
+                    WHEN COALESCE(amount_paid, 0) > 0 THEN 'partial'
+                    ELSE 'unpaid'
+                END
+                """
+            )
+        if table_exists(cursor, "company_settings") and not has_column(cursor, "company_settings", "company_logo_path"):
+            cursor.execute("ALTER TABLE company_settings ADD COLUMN company_logo_path TEXT")
+
+        if table_exists(cursor, "jobs"):
+            cursor.execute(
+                "UPDATE jobs SET status='upcoming' WHERE status IN ('pending', 'confirmed', 'in_progress', 'completed')"
+            )
+        if table_exists(cursor, "job_status_log"):
+            for old, new in (
+                ("pending", "upcoming"),
+                ("confirmed", "upcoming"),
+                ("in_progress", "active"),
+                ("completed", "done"),
+            ):
+                cursor.execute("UPDATE job_status_log SET old_status=%s WHERE old_status=%s", (new, old))
+                cursor.execute("UPDATE job_status_log SET new_status=%s WHERE new_status=%s", (new, old))
+
 
 
 init_db()
 
 
 def log_job_status_change(
-    cursor: sqlite3.Cursor, company_id: int, job_id: int, old_status: str | None, new_status: str, user_id: int
+    cursor: object, company_id: int, job_id: int, old_status: str | None, new_status: str, user_id: int
 ) -> None:
     cursor.execute(
         """
         INSERT INTO job_status_log (company_id, job_id, old_status, new_status, changed_at, changed_by_user_id)
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s)
         """,
         (company_id, job_id, old_status, new_status, datetime.utcnow().isoformat(), user_id),
     )
@@ -548,23 +570,23 @@ def warehouse_may_set_job_status(from_status: str, to_status: str) -> bool:
     return (from_status == "upcoming" and to_status == "active") or (from_status == "active" and to_status == "done")
 
 
-def qty_total(row: sqlite3.Row | dict) -> int:
+def qty_total(row: dict) -> int:
     v = row["quantity"] if "quantity" in row.keys() else None
     return max(1, int(v if v is not None else 1))
 
 
-def qty_rented(row: sqlite3.Row | dict) -> int:
+def qty_rented(row: dict) -> int:
     v = row["quantity_rented"] if "quantity_rented" in row.keys() else None
     return max(0, int(v if v is not None else 0))
 
 
-def qty_available(row: sqlite3.Row | dict) -> int:
+def qty_available(row: dict) -> int:
     return max(0, qty_total(row) - qty_rented(row))
 
 
-def sync_equipment_row(cursor: sqlite3.Cursor, equip_id: int, company_id: int) -> None:
+def sync_equipment_row(cursor: object, equip_id: int, company_id: int) -> None:
     cursor.execute(
-        "SELECT quantity, quantity_rented, rented_to, due_date FROM equipment WHERE id=? AND company_id=?",
+        "SELECT quantity, quantity_rented, rented_to, due_date FROM equipment WHERE id=%s AND company_id=%s",
         (equip_id, company_id),
     )
     row = cursor.fetchone()
@@ -579,18 +601,18 @@ def sync_equipment_row(cursor: sqlite3.Cursor, equip_id: int, company_id: int) -
             """
             UPDATE equipment
             SET quantity_rented=0, status='available', rented_to=NULL, due_date=NULL, prep_status='pending'
-            WHERE id=? AND company_id=?
+            WHERE id=%s AND company_id=%s
             """,
             (equip_id, company_id),
         )
     else:
         cursor.execute(
-            "UPDATE equipment SET quantity_rented=?, status='rented' WHERE id=? AND company_id=?",
+            "UPDATE equipment SET quantity_rented=%s, status='rented' WHERE id=%s AND company_id=%s",
             (qr, equip_id, company_id),
         )
 
 
-def process_job_status_stock_delta(cursor: sqlite3.Cursor, company_id: int, job_id: int, old_status: str, new_status: str) -> tuple[bool, str]:
+def process_job_status_stock_delta(cursor: object, company_id: int, job_id: int, old_status: str, new_status: str) -> tuple[bool, str]:
     if old_status == new_status:
         return True, ""
     if new_status == "done" and old_status != "done":
@@ -605,7 +627,7 @@ def process_job_status_stock_delta(cursor: sqlite3.Cursor, company_id: int, job_
     return True, ""
 
 
-def _resolve_prep_equipment_id(cursor: sqlite3.Cursor, company_id: int, row: sqlite3.Row) -> int | None:
+def _resolve_prep_equipment_id(cursor: object, company_id: int, row: dict) -> int | None:
     eid = row["equipment_id"]
     if eid is not None and eid != "":
         try:
@@ -613,14 +635,14 @@ def _resolve_prep_equipment_id(cursor: sqlite3.Cursor, company_id: int, row: sql
         except (TypeError, ValueError):
             pass
     cursor.execute(
-        "SELECT id FROM equipment WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
+        "SELECT id FROM equipment WHERE company_id=%s AND name=%s ORDER BY id ASC LIMIT 1",
         (company_id, row["equipment_name"]),
     )
     found = cursor.fetchone()
     return int(found["id"]) if found else None
 
 
-def _prep_row_is_sub_rental(row: sqlite3.Row) -> bool:
+def _prep_row_is_sub_rental(row: dict) -> bool:
     lt = row["line_type"] if "line_type" in row.keys() else None
     if (lt or "owned") == "sub_rental":
         return True
@@ -628,9 +650,9 @@ def _prep_row_is_sub_rental(row: sqlite3.Row) -> bool:
     return sid is not None and sid != ""
 
 
-def release_job_stock(cursor: sqlite3.Cursor, company_id: int, job_id: int) -> None:
+def release_job_stock(cursor: object, company_id: int, job_id: int) -> None:
     cursor.execute(
-        "SELECT equipment_id, equipment_name, quantity, line_type, sub_rental_id FROM job_prep_items WHERE job_id=? AND company_id=?",
+        "SELECT equipment_id, equipment_name, quantity, line_type, sub_rental_id FROM job_prep_items WHERE job_id=%s AND company_id=%s",
         (job_id, company_id),
     )
     for row in cursor.fetchall():
@@ -641,15 +663,15 @@ def release_job_stock(cursor: sqlite3.Cursor, company_id: int, job_id: int) -> N
         if not eid:
             continue
         cursor.execute(
-            "UPDATE equipment SET quantity_rented = MAX(0, COALESCE(quantity_rented,0) - ?) WHERE id=? AND company_id=?",
+            "UPDATE equipment SET quantity_rented = GREATEST(0, COALESCE(quantity_rented,0) - %s) WHERE id=%s AND company_id=%s",
             (qty, eid, company_id),
         )
         sync_equipment_row(cursor, eid, company_id)
 
 
-def reserve_job_stock_from_prep(cursor: sqlite3.Cursor, company_id: int, job_id: int) -> tuple[bool, str]:
+def reserve_job_stock_from_prep(cursor: object, company_id: int, job_id: int) -> tuple[bool, str]:
     cursor.execute(
-        "SELECT equipment_id, equipment_name, quantity, line_type, sub_rental_id FROM job_prep_items WHERE job_id=? AND company_id=?",
+        "SELECT equipment_id, equipment_name, quantity, line_type, sub_rental_id FROM job_prep_items WHERE job_id=%s AND company_id=%s",
         (job_id, company_id),
     )
     rows = cursor.fetchall()
@@ -661,7 +683,7 @@ def reserve_job_stock_from_prep(cursor: sqlite3.Cursor, company_id: int, job_id:
         eid = _resolve_prep_equipment_id(cursor, company_id, row)
         if not eid:
             return False, "Could not match equipment for job line."
-        cursor.execute("SELECT quantity, quantity_rented FROM equipment WHERE id=? AND company_id=?", (eid, company_id))
+        cursor.execute("SELECT quantity, quantity_rented FROM equipment WHERE id=%s AND company_id=%s", (eid, company_id))
         er = cursor.fetchone()
         if not er:
             return False, "Equipment not found."
@@ -670,7 +692,7 @@ def reserve_job_stock_from_prep(cursor: sqlite3.Cursor, company_id: int, job_id:
         checks.append((eid, qty))
     for eid, qty in checks:
         cursor.execute(
-            "UPDATE equipment SET quantity_rented = COALESCE(quantity_rented,0) + ? WHERE id=? AND company_id=?",
+            "UPDATE equipment SET quantity_rented = COALESCE(quantity_rented,0) + %s WHERE id=%s AND company_id=%s",
             (qty, eid, company_id),
         )
         sync_equipment_row(cursor, eid, company_id)
@@ -681,7 +703,7 @@ def quote_line_is_sub_rental(line: dict) -> bool:
     return line.get("line_type") == "sub_rental"
 
 
-def reserve_sub_rental_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id: int, lines: list) -> tuple[bool, str]:
+def reserve_sub_rental_stock_for_quote_lines(cursor: object, company_id: int, lines: list) -> tuple[bool, str]:
     sub_lines = [ln for ln in lines if quote_line_is_sub_rental(ln)]
     for line in sub_lines:
         qty = max(1, int(line.get("qty", 1) or 1))
@@ -691,7 +713,7 @@ def reserve_sub_rental_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id:
         except (TypeError, ValueError):
             return False, "Invalid sub-rental line."
         cursor.execute(
-            "SELECT quantity_available FROM sub_rentals WHERE id=? AND company_id=?",
+            "SELECT quantity_available FROM sub_rentals WHERE id=%s AND company_id=%s",
             (sid, company_id),
         )
         sr = cursor.fetchone()
@@ -706,8 +728,8 @@ def reserve_sub_rental_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id:
         cursor.execute(
             """
             UPDATE sub_rentals
-            SET quantity_available = quantity_available - ?
-            WHERE id=? AND company_id=? AND quantity_available >= ?
+            SET quantity_available = quantity_available - %s
+            WHERE id=%s AND company_id=%s AND quantity_available >= %s
             """,
             (qty, sid, company_id, qty),
         )
@@ -716,9 +738,9 @@ def reserve_sub_rental_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id:
     return True, ""
 
 
-def restore_sub_rental_stock_after_job_done(cursor: sqlite3.Cursor, company_id: int, job_id: int) -> None:
+def restore_sub_rental_stock_after_job_done(cursor: object, company_id: int, job_id: int) -> None:
     cursor.execute(
-        "SELECT sub_rental_id, units_used FROM sub_rental_usage WHERE job_id=? AND company_id=?",
+        "SELECT sub_rental_id, units_used FROM sub_rental_usage WHERE job_id=%s AND company_id=%s",
         (job_id, company_id),
     )
     for row in cursor.fetchall():
@@ -727,16 +749,16 @@ def restore_sub_rental_stock_after_job_done(cursor: sqlite3.Cursor, company_id: 
         cursor.execute(
             """
             UPDATE sub_rentals
-            SET quantity_available = MIN(quantity_total, quantity_available + ?)
-            WHERE id=? AND company_id=?
+            SET quantity_available = MIN(quantity_total, quantity_available + %s)
+            WHERE id=%s AND company_id=%s
             """,
             (u, sid, company_id),
         )
 
 
-def reserve_sub_rental_stock_when_job_reopened_from_done(cursor: sqlite3.Cursor, company_id: int, job_id: int) -> tuple[bool, str]:
+def reserve_sub_rental_stock_when_job_reopened_from_done(cursor: object, company_id: int, job_id: int) -> tuple[bool, str]:
     cursor.execute(
-        "SELECT sub_rental_id, units_used FROM sub_rental_usage WHERE job_id=? AND company_id=?",
+        "SELECT sub_rental_id, units_used FROM sub_rental_usage WHERE job_id=%s AND company_id=%s",
         (job_id, company_id),
     )
     rows = cursor.fetchall()
@@ -744,7 +766,7 @@ def reserve_sub_rental_stock_when_job_reopened_from_done(cursor: sqlite3.Cursor,
         u = max(1, int(row["units_used"] or 1))
         sid = int(row["sub_rental_id"])
         cursor.execute(
-            "SELECT quantity_available FROM sub_rentals WHERE id=? AND company_id=?",
+            "SELECT quantity_available FROM sub_rentals WHERE id=%s AND company_id=%s",
             (sid, company_id),
         )
         sr = cursor.fetchone()
@@ -758,8 +780,8 @@ def reserve_sub_rental_stock_when_job_reopened_from_done(cursor: sqlite3.Cursor,
         cursor.execute(
             """
             UPDATE sub_rentals
-            SET quantity_available = quantity_available - ?
-            WHERE id=? AND company_id=? AND quantity_available >= ?
+            SET quantity_available = quantity_available - %s
+            WHERE id=%s AND company_id=%s AND quantity_available >= %s
             """,
             (u, sid, company_id, u),
         )
@@ -768,7 +790,7 @@ def reserve_sub_rental_stock_when_job_reopened_from_done(cursor: sqlite3.Cursor,
     return True, ""
 
 
-def reserve_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id: int, lines: list) -> tuple[bool, str]:
+def reserve_stock_for_quote_lines(cursor: object, company_id: int, lines: list) -> tuple[bool, str]:
     for line in lines:
         if quote_line_is_sub_rental(line):
             continue
@@ -784,14 +806,14 @@ def reserve_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id: int, lines
             if not name:
                 return False, "Invalid quote line."
             cursor.execute(
-                "SELECT id FROM equipment WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
+                "SELECT id FROM equipment WHERE company_id=%s AND name=%s ORDER BY id ASC LIMIT 1",
                 (company_id, name),
             )
             found = cursor.fetchone()
             if not found:
                 return False, f"No equipment named {name!r}."
             eid = int(found["id"])
-        cursor.execute("SELECT quantity, quantity_rented FROM equipment WHERE id=? AND company_id=?", (eid, company_id))
+        cursor.execute("SELECT quantity, quantity_rented FROM equipment WHERE id=%s AND company_id=%s", (eid, company_id))
         er = cursor.fetchone()
         if not er:
             return False, "Equipment not found."
@@ -810,12 +832,12 @@ def reserve_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id: int, lines
         if not eid:
             name = str(line.get("name", "")).strip()
             cursor.execute(
-                "SELECT id FROM equipment WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
+                "SELECT id FROM equipment WHERE company_id=%s AND name=%s ORDER BY id ASC LIMIT 1",
                 (company_id, name),
             )
             eid = int(cursor.fetchone()["id"])
         cursor.execute(
-            "UPDATE equipment SET quantity_rented = COALESCE(quantity_rented,0) + ? WHERE id=? AND company_id=?",
+            "UPDATE equipment SET quantity_rented = COALESCE(quantity_rented,0) + %s WHERE id=%s AND company_id=%s",
             (qty, eid, company_id),
         )
         sync_equipment_row(cursor, eid, company_id)
@@ -823,14 +845,14 @@ def reserve_stock_for_quote_lines(cursor: sqlite3.Cursor, company_id: int, lines
 
 
 def apply_rental_return_units(
-    cursor: sqlite3.Cursor, company_id: int, equipment_name: str, return_units: int
+    cursor: object, company_id: int, equipment_name: str, return_units: int
 ) -> None:
     remaining = return_units
     while remaining > 0:
         cursor.execute(
             """
             SELECT id, COALESCE(units, 1) AS u FROM rental_history
-            WHERE equipment_name=? AND company_id=? AND date_returned IS NULL
+            WHERE equipment_name=%s AND company_id=%s AND date_returned IS NULL
             ORDER BY id ASC LIMIT 1
             """,
             (equipment_name, company_id),
@@ -841,17 +863,17 @@ def apply_rental_return_units(
         hu = max(1, int(h["u"]))
         if hu <= remaining:
             cursor.execute(
-                "UPDATE rental_history SET date_returned=? WHERE id=?",
+                "UPDATE rental_history SET date_returned=%s WHERE id=%s",
                 (datetime.now().strftime("%Y-%m-%d"), h["id"]),
             )
             remaining -= hu
         else:
-            cursor.execute("UPDATE rental_history SET units=? WHERE id=?", (hu - remaining, h["id"]))
+            cursor.execute("UPDATE rental_history SET units=%s WHERE id=%s", (hu - remaining, h["id"]))
             remaining = 0
 
 
-def next_invoice_number(cursor: sqlite3.Cursor, company_id: int) -> str:
-    cursor.execute("SELECT COUNT(*) AS c FROM invoices WHERE company_id=?", (company_id,))
+def next_invoice_number(cursor: object, company_id: int) -> str:
+    cursor.execute("SELECT COUNT(*) AS c FROM invoices WHERE company_id=%s", (company_id,))
     n = cursor.fetchone()["c"] + 1
     return f"INV-{company_id}-{n:05d}"
 
@@ -923,17 +945,17 @@ def company_logo_web_path(settings: dict | None) -> str | None:
     return None
 
 
-def refresh_invoice_payment_aggregate(cursor: sqlite3.Cursor, invoice_id: int, company_id: int) -> None:
+def refresh_invoice_payment_aggregate(cursor: object, invoice_id: int, company_id: int) -> None:
     cursor.execute(
         """
         SELECT COALESCE(SUM(amount), 0) AS s FROM invoice_payments
-        WHERE invoice_id=? AND company_id=?
+        WHERE invoice_id=%s AND company_id=%s
         """,
         (invoice_id, company_id),
     )
     paid_sum = int(cursor.fetchone()["s"] or 0)
     cursor.execute(
-        "SELECT total FROM invoices WHERE id=? AND company_id=?",
+        "SELECT total FROM invoices WHERE id=%s AND company_id=%s",
         (invoice_id, company_id),
     )
     row = cursor.fetchone()
@@ -947,7 +969,7 @@ def refresh_invoice_payment_aggregate(cursor: sqlite3.Cursor, invoice_id: int, c
     else:
         status = "unpaid"
     cursor.execute(
-        "UPDATE invoices SET amount_paid=?, payment_status=? WHERE id=? AND company_id=?",
+        "UPDATE invoices SET amount_paid=%s, payment_status=%s WHERE id=%s AND company_id=%s",
         (paid_sum, status, invoice_id, company_id),
     )
 
@@ -1053,11 +1075,10 @@ def build_invoice_pdf_bytes(
     quote_row = None
     qid = inv.get("quote_id")
     if cid and qid:
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM quotes WHERE id=? AND company_id=?", (int(qid), cid))
-        quote_row = cur.fetchone()
-        conn.close()
+        with get_db() as conn:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur.execute("SELECT * FROM quotes WHERE id=%s AND company_id=%s", (int(qid), cid))
+            quote_row = cur.fetchone()
     if quote_row:
         qd = dict(quote_row)
         for flow in pdf_job_details_flowables(
@@ -1240,25 +1261,24 @@ def client_contact_from_directory(company_id: int, client_name: str | None) -> s
     name = (client_name or "").strip()
     if not name:
         return ""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM clients WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
-        (company_id, name),
-    )
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return ""
-    d = dict(row)
-    parts: list[str] = []
-    for key in ("address", "email", "phone", "mobile", "contact_name"):
-        v = d.get(key)
-        if v is not None and str(v).strip():
-            parts.append(str(v).strip())
-    return " · ".join(parts)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM clients WHERE company_id=%s AND name=%s ORDER BY id ASC LIMIT 1",
+            (company_id, name),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return ""
+        d = dict(row)
+        parts: list[str] = []
+        for key in ("address", "email", "phone", "mobile", "contact_name"):
+            v = d.get(key)
+            if v is not None and str(v).strip():
+                parts.append(str(v).strip())
+        return " · ".join(parts)
+    
+    
 def hash_password(password: str, salt: str) -> str:
     if salt == "bcrypt":
         import bcrypt
@@ -1320,15 +1340,15 @@ def send_password_reset_email(to_email, reset_link):
         return False
 
 
-def fetch_reset_token_row(cursor: sqlite3.Cursor, token: str) -> sqlite3.Row | None:
+def fetch_reset_token_row(cursor: object, token: str) -> dict | None:
     cursor.execute(
-        "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token=?",
+        "SELECT id, user_id, expires_at, used FROM password_reset_tokens WHERE token=%s",
         (token,),
     )
     return cursor.fetchone()
 
 
-def reset_token_error_message(row: sqlite3.Row | None) -> str | None:
+def reset_token_error_message(row: dict | None) -> str | None:
     if not row:
         return "This reset link is invalid or has expired. Please request a new one."
     if row["used"]:
@@ -1339,60 +1359,53 @@ def reset_token_error_message(row: sqlite3.Row | None) -> str | None:
 
 
 def create_session(response: RedirectResponse, user_id: int) -> None:
-    conn = get_db()
-    cursor = conn.cursor()
-    token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(24)
-    expires_at = (datetime.utcnow() + timedelta(days=SESSION_DAYS)).isoformat()
-    cursor.execute("INSERT INTO sessions (token, user_id, csrf_token, expires_at) VALUES (?, ?, ?, ?)", (token, user_id, csrf_token, expires_at))
-    conn.commit()
-    conn.close()
-    response.set_cookie("session_token", token, httponly=True, samesite="lax", secure=SESSION_SECURE_COOKIE, max_age=SESSION_DAYS * 24 * 3600)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        token = secrets.token_urlsafe(32)
+        csrf_token = secrets.token_urlsafe(24)
+        expires_at = (datetime.utcnow() + timedelta(days=SESSION_DAYS)).isoformat()
+        cursor.execute("INSERT INTO sessions (token, user_id, csrf_token, expires_at) VALUES (%s, %s, %s, %s)", (token, user_id, csrf_token, expires_at))
+        response.set_cookie("session_token", token, httponly=True, samesite="lax", secure=SESSION_SECURE_COOKIE, max_age=SESSION_DAYS * 24 * 3600)
+    
+    
 def current_user(request: Request):
     token = request.cookies.get("session_token")
     if not token:
         return None
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT u.id as user_id, u.full_name, u.email, u.company_id, u.role, u.must_change_password, c.name as company_record_name, cs.company_name, s.csrf_token
-        FROM sessions s
-        JOIN users u ON u.id = s.user_id
-        JOIN companies c ON c.id = u.company_id
-        LEFT JOIN company_settings cs ON cs.company_id = u.company_id
-        WHERE s.token=?
-        """,
-        (token,),
-    )
-    user = cursor.fetchone()
-    if not user:
-        conn.close()
-        return None
-    cursor.execute("SELECT expires_at FROM sessions WHERE token=?", (token,))
-    expiry = cursor.fetchone()
-    if not expiry or datetime.fromisoformat(expiry["expires_at"]) < datetime.utcnow():
-        cursor.execute("DELETE FROM sessions WHERE token=?", (token,))
-        conn.commit()
-        conn.close()
-        return None
-    user_dict = dict(user)
-    if not user_dict.get("csrf_token"):
-        new_csrf = secrets.token_urlsafe(24)
-        cursor.execute("UPDATE sessions SET csrf_token=? WHERE token=?", (new_csrf, token))
-        conn.commit()
-        user_dict["csrf_token"] = new_csrf
-    try:
-        cid_nav = int(user_dict["company_id"])
-        user_dict["has_company_logo"] = company_static_logo_path(cid_nav).is_file()
-    except (TypeError, ValueError, KeyError):
-        user_dict["has_company_logo"] = False
-    conn.close()
-    return user_dict
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT u.id as user_id, u.full_name, u.email, u.company_id, u.role, u.must_change_password, c.name as company_record_name, cs.company_name, s.csrf_token
+            FROM sessions s
+            JOIN users u ON u.id = s.user_id
+            JOIN companies c ON c.id = u.company_id
+            LEFT JOIN company_settings cs ON cs.company_id = u.company_id
+            WHERE s.token=%s
+            """,
+            (token,),
+        )
+        user = cursor.fetchone()
+        if not user:
+            return None
+        cursor.execute("SELECT expires_at FROM sessions WHERE token=%s", (token,))
+        expiry = cursor.fetchone()
+        if not expiry or datetime.fromisoformat(expiry["expires_at"]) < datetime.utcnow():
+            cursor.execute("DELETE FROM sessions WHERE token=%s", (token,))
+            return None
+        user_dict = dict(user)
+        if not user_dict.get("csrf_token"):
+            new_csrf = secrets.token_urlsafe(24)
+            cursor.execute("UPDATE sessions SET csrf_token=%s WHERE token=%s", (new_csrf, token))
+            user_dict["csrf_token"] = new_csrf
+        try:
+            cid_nav = int(user_dict["company_id"])
+            user_dict["has_company_logo"] = company_static_logo_path(cid_nav).is_file()
+        except (TypeError, ValueError, KeyError):
+            user_dict["has_company_logo"] = False
+        return user_dict
+    
+    
 def render_not_authorized(request: Request, user: dict | None):
     return templates.TemplateResponse(
         request=request,
@@ -1421,50 +1434,63 @@ async def validate_csrf(request: Request, user: dict) -> bool:
 
 def get_company_settings(company_id: int) -> dict:
     """Merged company profile: company_settings (quote footer) overlaid by companies table fields."""
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM companies WHERE id=?", (company_id,))
-    co = cursor.fetchone()
-    cursor.execute("SELECT * FROM company_settings WHERE company_id=?", (company_id,))
-    cs = cursor.fetchone()
-    conn.close()
-    out: dict = {"company_id": company_id}
-    if cs:
-        csd = dict(cs)
-        out["quote_footer"] = csd.get("quote_footer") or ""
-        out["company_logo_path"] = csd.get("company_logo_path")
-        out["company_name"] = (csd.get("company_name") or "").strip()
-        out["tagline"] = csd.get("tagline") or ""
-        out["email"] = csd.get("email") or ""
-        out["phone"] = csd.get("phone") or ""
-        out["address"] = csd.get("address") or ""
-        out["vat_number"] = csd.get("vat_number") or ""
-    else:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM companies WHERE id=%s", (company_id,))
+        co = cursor.fetchone()
+        cursor.execute("SELECT * FROM company_settings WHERE company_id=%s", (company_id,))
+        cs = cursor.fetchone()
+        out: dict = {"company_id": company_id}
+        if cs:
+            csd = dict(cs)
+            out["quote_footer"] = csd.get("quote_footer") or ""
+            out["company_logo_path"] = csd.get("company_logo_path")
+            out["company_name"] = (csd.get("company_name") or "").strip()
+            out["tagline"] = csd.get("tagline") or ""
+            out["email"] = csd.get("email") or ""
+            out["phone"] = csd.get("phone") or ""
+            out["address"] = csd.get("address") or ""
+            out["vat_number"] = csd.get("vat_number") or ""
+        else:
+            out.setdefault("quote_footer", "")
+            out["company_name"] = ""
+            out["tagline"] = ""
+            out["email"] = ""
+            out["phone"] = ""
+            out["address"] = ""
+            out["vat_number"] = ""
+        if co:
+            cod = dict(co)
+            nm = (cod.get("name") or "").strip()
+            if nm:
+                out["company_name"] = nm
+            for fld in ("tagline", "email", "phone", "address", "vat_number"):
+                v = cod.get(fld)
+                if v is not None and str(v).strip() != "":
+                    out[fld] = str(v).strip()
+            try:
+                out["vat_percent"] = float(cod.get("vat_percent") if cod.get("vat_percent") is not None else 15)
+            except (TypeError, ValueError):
+                out["vat_percent"] = 15.0
+            out["vat_enabled"] = int(cod.get("vat_enabled") or 0)
+            try:
+                out["default_discount_percent"] = float(cod.get("default_discount_percent") if cod.get("default_discount_percent") is not None else 0)
+            except (TypeError, ValueError):
+                out["default_discount_percent"] = 0.0
+            for fld in (
+                "bank_name",
+                "bank_account_holder",
+                "bank_account_number",
+                "bank_account_type",
+                "bank_branch_code",
+                "bank_reference",
+                "terms_and_conditions",
+            ):
+                out[fld] = (cod.get(fld) or "").strip() if cod.get(fld) is not None else ""
         out.setdefault("quote_footer", "")
-        out["company_name"] = ""
-        out["tagline"] = ""
-        out["email"] = ""
-        out["phone"] = ""
-        out["address"] = ""
-        out["vat_number"] = ""
-    if co:
-        cod = dict(co)
-        nm = (cod.get("name") or "").strip()
-        if nm:
-            out["company_name"] = nm
-        for fld in ("tagline", "email", "phone", "address", "vat_number"):
-            v = cod.get(fld)
-            if v is not None and str(v).strip() != "":
-                out[fld] = str(v).strip()
-        try:
-            out["vat_percent"] = float(cod.get("vat_percent") if cod.get("vat_percent") is not None else 15)
-        except (TypeError, ValueError):
-            out["vat_percent"] = 15.0
-        out["vat_enabled"] = int(cod.get("vat_enabled") or 0)
-        try:
-            out["default_discount_percent"] = float(cod.get("default_discount_percent") if cod.get("default_discount_percent") is not None else 0)
-        except (TypeError, ValueError):
-            out["default_discount_percent"] = 0.0
+        out.setdefault("vat_percent", 15.0)
+        out.setdefault("vat_enabled", 0)
+        out.setdefault("default_discount_percent", 0.0)
         for fld in (
             "bank_name",
             "bank_account_holder",
@@ -1474,24 +1500,10 @@ def get_company_settings(company_id: int) -> dict:
             "bank_reference",
             "terms_and_conditions",
         ):
-            out[fld] = (cod.get(fld) or "").strip() if cod.get(fld) is not None else ""
-    out.setdefault("quote_footer", "")
-    out.setdefault("vat_percent", 15.0)
-    out.setdefault("vat_enabled", 0)
-    out.setdefault("default_discount_percent", 0.0)
-    for fld in (
-        "bank_name",
-        "bank_account_holder",
-        "bank_account_number",
-        "bank_account_type",
-        "bank_branch_code",
-        "bank_reference",
-        "terms_and_conditions",
-    ):
-        out.setdefault(fld, "")
-    return out
-
-
+            out.setdefault(fld, "")
+        return out
+    
+    
 def company_banking_configured(settings: dict) -> bool:
     return bool((settings.get("bank_name") or "").strip() and (settings.get("bank_account_number") or "").strip())
 
@@ -1514,7 +1526,7 @@ def pdf_banking_detail_flowables(settings: dict, styles) -> list:
     return [Spacer(1, 10), Paragraph("<br/>".join(parts), styles["Normal"])]
 
 
-def client_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+def client_row_to_dict(row: dict | None) -> dict | None:
     if not row:
         return None
     d = dict(row)
@@ -1533,26 +1545,24 @@ def client_profile_by_name(company_id: int, client_name: str | None) -> dict | N
     name = (client_name or "").strip()
     if not name:
         return None
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM clients WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
-        (company_id, name),
-    )
-    row = cursor.fetchone()
-    conn.close()
-    return client_row_to_dict(row)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM clients WHERE company_id=%s AND name=%s ORDER BY id ASC LIMIT 1",
+            (company_id, name),
+        )
+        row = cursor.fetchone()
+        return client_row_to_dict(row)
+    
+    
 def client_profile_by_id(company_id: int, client_id: int) -> dict | None:
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM clients WHERE id=? AND company_id=?", (client_id, company_id))
-    row = cursor.fetchone()
-    conn.close()
-    return client_row_to_dict(row)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM clients WHERE id=%s AND company_id=%s", (client_id, company_id))
+        row = cursor.fetchone()
+        return client_row_to_dict(row)
+    
+    
 def pdf_client_details_flowables(client_name: str, profile: dict | None, styles) -> list:
     parts = ["<b>Client</b>", f"<b>{escape(str(client_name or '').strip() or '—')}</b>"]
     if profile:
@@ -1761,46 +1771,44 @@ def register_company(company_name: str = Form(...), full_name: str = Form(...), 
     clean_email = email.strip().lower()
     if not clean_company or not clean_full_name or not clean_email or len(password) < 6:
         return RedirectResponse(url="/register?error=Please%20fill%20all%20fields%20and%20use%20a%206%2B%20char%20password", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO companies (name, created_at) VALUES (?, ?)", (clean_company, datetime.utcnow().isoformat()))
-        company_id = cursor.lastrowid
-        cursor.execute(
-            """
-            INSERT INTO users (company_id, full_name, email, password_hash, password_salt, role, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (company_id, clean_full_name, clean_email, hash_password(password, "bcrypt"), "bcrypt", "admin", datetime.utcnow().isoformat()),
-        )
-        cursor.execute(
-            """
-            INSERT INTO company_settings
-            (company_id, company_name, tagline, email, phone, address, vat_number, quote_footer)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (company_id, clean_company, "Professional Equipment Rentals", clean_email, "", "", "", "Thank you for your business."),
-        )
-        cursor.execute(
-            """
-            UPDATE companies
-            SET tagline=?, email=?, vat_percent=15, vat_enabled=0, default_discount_percent=0
-            WHERE id=?
-            """,
-            ("Professional Equipment Rentals", clean_email, company_id),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
-        return RedirectResponse(url="/register?error=Company%20or%20email%20already%20exists", status_code=303)
-    cursor.execute("SELECT id FROM users WHERE email=?", (clean_email,))
-    user = cursor.fetchone()
-    conn.close()
-    response = RedirectResponse(url="/", status_code=303)
-    create_session(response, user["id"])
-    return response
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute("INSERT INTO companies (name, created_at) VALUES (%s, %s) RETURNING id", (clean_company, datetime.utcnow().isoformat()))
+            company_id = cursor.fetchone()["id"]
+            cursor.execute(
+                """
+                INSERT INTO users (company_id, full_name, email, password_hash, password_salt, role, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (company_id, clean_full_name, clean_email, hash_password(password, "bcrypt"), "bcrypt", "admin", datetime.utcnow().isoformat()),
+            )
+            cursor.execute(
+                """
+                INSERT INTO company_settings
+                (company_id, company_name, tagline, email, phone, address, vat_number, quote_footer)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (company_id, clean_company, "Professional Equipment Rentals", clean_email, "", "", "", "Thank you for your business."),
+            )
+            cursor.execute(
+                """
+                UPDATE companies
+                SET tagline=%s, email=%s, vat_percent=15, vat_enabled=0, default_discount_percent=0
+                WHERE id=%s
+                """,
+                ("Professional Equipment Rentals", clean_email, company_id),
+            )
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            return RedirectResponse(url="/register?error=Company%20or%20email%20already%20exists", status_code=303)
+        cursor.execute("SELECT id FROM users WHERE email=%s", (clean_email,))
+        user = cursor.fetchone()
+        response = RedirectResponse(url="/", status_code=303)
+        create_session(response, user["id"])
+        return response
+    
+    
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return templates.TemplateResponse(request=request, name="login.html", context={"title": "Login"})
@@ -1818,106 +1826,93 @@ def forgot_password_submit(email: str = Form(...)):
         f"Forgot password triggered for email: {submitted_email}, SendGrid configured: {bool(os.environ.get('SENDGRID_API_KEY'))}"
     )
     print("CHECKPOINT 1 - about to query user", flush=True)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, company_id, email FROM users WHERE email=?", (submitted_email,))
-    user = cursor.fetchone()
-    print(f"CHECKPOINT 2 - user found: {user is not None}", flush=True)
-    if user:
-        cursor.execute("SELECT id FROM password_reset_requests WHERE user_id=?", (user["id"],))
-        existing = cursor.fetchone()
-        if not existing:
-            cursor.execute(
-                "INSERT INTO password_reset_requests (user_id, company_id, requested_at) VALUES (?, ?, ?)",
-                (user["id"], user["company_id"], datetime.utcnow().isoformat()),
-            )
-        if sendgrid_configured():
-            token = secrets.token_urlsafe(32)
-            expires_at = (datetime.now() + timedelta(hours=1)).isoformat()
-            reset_link = f"{BASE_URL}/reset-password/{token}"
-            print("CHECKPOINT 3 - entering try block", flush=True)
-            try:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT id, company_id, email FROM users WHERE email=%s", (submitted_email,))
+        user = cursor.fetchone()
+        print(f"CHECKPOINT 2 - user found: {user is not None}", flush=True)
+        if user:
+            cursor.execute("SELECT id FROM password_reset_requests WHERE user_id=%s", (user["id"],))
+            existing = cursor.fetchone()
+            if not existing:
                 cursor.execute(
-                    "INSERT INTO password_reset_tokens (user_id, token, expires_at, used) VALUES (?, ?, ?, 0)",
-                    (user["id"], token, expires_at),
+                    "INSERT INTO password_reset_requests (user_id, company_id, requested_at) VALUES (%s, %s, %s)",
+                    (user["id"], user["company_id"], datetime.utcnow().isoformat()),
                 )
-            except Exception as e:
-                print(f"FORGOT PASSWORD ERROR: {str(e)}", flush=True)
-            email_sent = send_password_reset_email(user["email"], reset_link)
-            print(f"EMAIL SENT RESULT: {email_sent}", flush=True)
-        conn.commit()
-    conn.close()
-    return RedirectResponse(url="/forgot-password?submitted=1", status_code=303)
-
-
+            if sendgrid_configured():
+                token = secrets.token_urlsafe(32)
+                expires_at = (datetime.now() + timedelta(hours=1)).isoformat()
+                reset_link = f"{BASE_URL}/reset-password/{token}"
+                print("CHECKPOINT 3 - entering try block", flush=True)
+                try:
+                    cursor.execute(
+                        "INSERT INTO password_reset_tokens (user_id, token, expires_at, used) VALUES (%s, %s, %s, 0)",
+                        (user["id"], token, expires_at),
+                    )
+                except Exception as e:
+                    print(f"FORGOT PASSWORD ERROR: {str(e)}", flush=True)
+                email_sent = send_password_reset_email(user["email"], reset_link)
+                print(f"EMAIL SENT RESULT: {email_sent}", flush=True)
+        return RedirectResponse(url="/forgot-password?submitted=1", status_code=303)
+    
+    
 @app.get("/reset-password/{token}", response_class=HTMLResponse)
 def reset_password_page(request: Request, token: str):
-    conn = get_db()
-    cursor = conn.cursor()
-    row = fetch_reset_token_row(cursor, token)
-    conn.close()
-    error = reset_token_error_message(row)
-    return templates.TemplateResponse(
-        request=request,
-        name="reset_password.html",
-        context={"title": "Reset Password", "error": error, "token": None if error else token},
-    )
-
-
-@app.post("/reset-password/{token}")
-def reset_password_submit(request: Request, token: str, password: str = Form(...), confirm_password: str = Form(...)):
-    conn = get_db()
-    cursor = conn.cursor()
-    row = fetch_reset_token_row(cursor, token)
-    error = reset_token_error_message(row)
-    if error:
-        conn.close()
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        row = fetch_reset_token_row(cursor, token)
+        error = reset_token_error_message(row)
         return templates.TemplateResponse(
             request=request,
             name="reset_password.html",
-            context={"title": "Reset Password", "error": error, "token": None},
+            context={"title": "Reset Password", "error": error, "token": None if error else token},
         )
-    if len(password) < 8:
-        conn.close()
-        return RedirectResponse(url=f"/reset-password/{token}?error=Password%20must%20be%20at%20least%208%20characters", status_code=303)
-    if password != confirm_password:
-        conn.close()
-        return RedirectResponse(url=f"/reset-password/{token}?error=Passwords%20do%20not%20match", status_code=303)
-    cursor.execute(
-        "UPDATE users SET password_hash=?, password_salt='bcrypt', must_change_password=0 WHERE id=?",
-        (hash_password(password, "bcrypt"), row["user_id"]),
-    )
-    cursor.execute("UPDATE password_reset_tokens SET used=1 WHERE id=?", (row["id"],))
-    cursor.execute("DELETE FROM password_reset_requests WHERE user_id=?", (row["user_id"],))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(
-        url="/login?success=Password%20reset%20successfully.%20Please%20log%20in.",
-        status_code=303,
-    )
-
-
+    
+    
+@app.post("/reset-password/{token}")
+def reset_password_submit(request: Request, token: str, password: str = Form(...), confirm_password: str = Form(...)):
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        row = fetch_reset_token_row(cursor, token)
+        error = reset_token_error_message(row)
+        if error:
+            return templates.TemplateResponse(
+                request=request,
+                name="reset_password.html",
+                context={"title": "Reset Password", "error": error, "token": None},
+            )
+        if len(password) < 8:
+            return RedirectResponse(url=f"/reset-password/{token}?error=Password%20must%20be%20at%20least%208%20characters", status_code=303)
+        if password != confirm_password:
+            return RedirectResponse(url=f"/reset-password/{token}?error=Passwords%20do%20not%20match", status_code=303)
+        cursor.execute(
+            "UPDATE users SET password_hash=%s, password_salt='bcrypt', must_change_password=0 WHERE id=%s",
+            (hash_password(password, "bcrypt"), row["user_id"]),
+        )
+        cursor.execute("UPDATE password_reset_tokens SET used=1 WHERE id=%s", (row["id"],))
+        cursor.execute("DELETE FROM password_reset_requests WHERE user_id=%s", (row["user_id"],))
+        return RedirectResponse(
+            url="/login?success=Password%20reset%20successfully.%20Please%20log%20in.",
+            status_code=303,
+        )
+    
+    
 @app.post("/login")
 def login(email: str = Form(...), password: str = Form(...)):
     clean_email = email.strip().lower()
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE email=?", (clean_email,))
-    user = cursor.fetchone()
-    conn.close()
-    if not user or not verify_password(password, user["password_hash"], user["password_salt"]):
-        return RedirectResponse(url="/login?error=Invalid%20credentials", status_code=303)
-    if user["password_salt"] != "bcrypt":
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("UPDATE users SET password_hash=?, password_salt=? WHERE id=?", (hash_password(password, "bcrypt"), "bcrypt", user["id"]))
-        conn.commit()
-        conn.close()
-    response = RedirectResponse(url="/", status_code=303)
-    create_session(response, user["id"])
-    return response
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM users WHERE email=%s", (clean_email,))
+        user = cursor.fetchone()
+        if not user or not verify_password(password, user["password_hash"], user["password_salt"]):
+            return RedirectResponse(url="/login?error=Invalid%20credentials", status_code=303)
+        if user["password_salt"] != "bcrypt":
+            cursor.execute("UPDATE users SET password_hash=%s, password_salt=%s WHERE id=%s", (hash_password(password, "bcrypt"), "bcrypt", user["id"]))
+        response = RedirectResponse(url="/", status_code=303)
+        create_session(response, user["id"])
+        return response
+    
+    
 @app.get("/change-password", response_class=HTMLResponse)
 def change_password_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management", "warehouse"}, allow_password_change_page=True)
@@ -1937,17 +1932,15 @@ async def change_password_submit(request: Request, password: str = Form(...), co
         return RedirectResponse(url="/change-password?error=Password%20must%20be%20at%20least%206%20characters", status_code=303)
     if password != confirm_password:
         return RedirectResponse(url="/change-password?error=Passwords%20do%20not%20match", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE users SET password_hash=?, password_salt='bcrypt', must_change_password=0 WHERE id=?",
-        (hash_password(password, "bcrypt"), user["user_id"]),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "UPDATE users SET password_hash=%s, password_salt='bcrypt', must_change_password=0 WHERE id=%s",
+            (hash_password(password, "bcrypt"), user["user_id"]),
+        )
+        return RedirectResponse(url="/", status_code=303)
+    
+    
 @app.post("/logout")
 async def logout(request: Request):
     user = current_user(request)
@@ -1955,11 +1948,9 @@ async def logout(request: Request):
         return RedirectResponse(url="/?error=Invalid%20security%20token", status_code=303)
     token = request.cookies.get("session_token")
     if token:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM sessions WHERE token=?", (token,))
-        conn.commit()
-        conn.close()
+        with get_db() as conn:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("DELETE FROM sessions WHERE token=%s", (token,))
     response = RedirectResponse(url="/login", status_code=303)
     response.delete_cookie("session_token")
     return response
@@ -1972,92 +1963,90 @@ def home(request: Request):
         return response
     if user["role"] == "warehouse":
         return RedirectResponse(url="/warehouse", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM equipment WHERE company_id=? ORDER BY id DESC", (user["company_id"],))
-    all_items = cursor.fetchall()
-    today = datetime.now().strftime("%Y-%m-%d")
-    total_count = sum(qty_total(r) for r in all_items)
-    available_count = sum(qty_available(r) for r in all_items)
-    rented_count = sum(qty_rented(r) for r in all_items)
-    overdue_count = sum(
-        (qty_rented(r) if (r["due_date"] and r["due_date"] < today and qty_rented(r) > 0) else 0) for r in all_items
-    )
-    stock_filter = request.query_params.get("stock", "all")
-    if stock_filter == "available":
-        items = [r for r in all_items if qty_available(r) > 0]
-    elif stock_filter == "rented":
-        items = [r for r in all_items if qty_rented(r) > 0]
-    elif stock_filter == "overdue":
-        items = [r for r in all_items if qty_rented(r) > 0 and r["due_date"] and r["due_date"] < today]
-    else:
-        items = list(all_items)
-    cursor.execute(
-        "SELECT * FROM rental_history WHERE company_id=? ORDER BY id DESC",
-        (user["company_id"],),
-    )
-    history_rows = [dict(r) for r in cursor.fetchall()]
-    cursor.execute(
-        "SELECT * FROM sub_rentals WHERE company_id=? ORDER BY id DESC",
-        (user["company_id"],),
-    )
-    sub_rental_rows = cursor.fetchall()
-    conn.close()
-    settings = get_company_settings(user["company_id"])
-    return templates.TemplateResponse(
-        request=request,
-        name="home.html",
-        context={
-            "title": f"{settings.get('company_name', 'Dashboard')} Dashboard",
-            "items": items,
-            "today": today,
-            "current_user": user,
-            "stock_filter": stock_filter,
-            "total_count": total_count,
-            "available_count": available_count,
-            "rented_count": rented_count,
-            "overdue_count": overdue_count,
-            "history_rows": history_rows,
-            "sub_rentals": sub_rental_rows,
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM equipment WHERE company_id=%s ORDER BY id DESC", (user["company_id"],))
+        all_items = cursor.fetchall()
+        today = datetime.now().strftime("%Y-%m-%d")
+        total_count = sum(qty_total(r) for r in all_items)
+        available_count = sum(qty_available(r) for r in all_items)
+        rented_count = sum(qty_rented(r) for r in all_items)
+        overdue_count = sum(
+            (qty_rented(r) if (r["due_date"] and r["due_date"] < today and qty_rented(r) > 0) else 0) for r in all_items
+        )
+        stock_filter = request.query_params.get("stock", "all")
+        if stock_filter == "available":
+            items = [r for r in all_items if qty_available(r) > 0]
+        elif stock_filter == "rented":
+            items = [r for r in all_items if qty_rented(r) > 0]
+        elif stock_filter == "overdue":
+            items = [r for r in all_items if qty_rented(r) > 0 and r["due_date"] and r["due_date"] < today]
+        else:
+            items = list(all_items)
+        cursor.execute(
+            "SELECT * FROM rental_history WHERE company_id=%s ORDER BY id DESC",
+            (user["company_id"],),
+        )
+        history_rows = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(
+            "SELECT * FROM sub_rentals WHERE company_id=%s ORDER BY id DESC",
+            (user["company_id"],),
+        )
+        sub_rental_rows = cursor.fetchall()
+        settings = get_company_settings(user["company_id"])
+        return templates.TemplateResponse(
+            request=request,
+            name="home.html",
+            context={
+                "title": f"{settings.get('company_name', 'Dashboard')} Dashboard",
+                "items": items,
+                "today": today,
+                "current_user": user,
+                "stock_filter": stock_filter,
+                "total_count": total_count,
+                "available_count": available_count,
+                "rented_count": rented_count,
+                "overdue_count": overdue_count,
+                "history_rows": history_rows,
+                "sub_rentals": sub_rental_rows,
+            },
+        )
+    
+    
 @app.get("/users", response_class=HTMLResponse)
 def users_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, full_name, email, role, created_at FROM users WHERE company_id=? ORDER BY id DESC", (user["company_id"],))
-    users = cursor.fetchall()
-    cursor.execute(
-        """
-        SELECT pr.id, pr.user_id, pr.requested_at, u.full_name, u.email
-        FROM password_reset_requests pr
-        JOIN users u ON u.id = pr.user_id
-        WHERE pr.company_id=?
-        ORDER BY pr.requested_at DESC
-        """,
-        (user["company_id"],),
-    )
-    reset_requests = cursor.fetchall()
-    conn.close()
-    return templates.TemplateResponse(
-        request=request,
-        name="users.html",
-        context={
-            "title": "User Management",
-            "users": users,
-            "roles": sorted(VALID_ROLES),
-            "reset_requests": reset_requests,
-            "temp_password": request.query_params.get("temp_password", ""),
-            "current_user": user,
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT id, full_name, email, role, created_at FROM users WHERE company_id=%s ORDER BY id DESC", (user["company_id"],))
+        users = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT pr.id, pr.user_id, pr.requested_at, u.full_name, u.email
+            FROM password_reset_requests pr
+            JOIN users u ON u.id = pr.user_id
+            WHERE pr.company_id=%s
+            ORDER BY pr.requested_at DESC
+            """,
+            (user["company_id"],),
+        )
+        reset_requests = cursor.fetchall()
+        return templates.TemplateResponse(
+            request=request,
+            name="users.html",
+            context={
+                "title": "User Management",
+                "users": users,
+                "roles": sorted(VALID_ROLES),
+                "reset_requests": reset_requests,
+                "temp_password": request.query_params.get("temp_password", ""),
+                "current_user": user,
+            },
+        )
+    
+    
 @app.post("/users")
 async def users_add(request: Request, full_name: str = Form(...), email: str = Form(...), password: str = Form(...), role: str = Form(...)):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2071,24 +2060,22 @@ async def users_add(request: Request, full_name: str = Form(...), email: str = F
         return RedirectResponse(url="/users?error=Invalid%20role", status_code=303)
     if not clean_name or not clean_email or len(password) < 6:
         return RedirectResponse(url="/users?error=Invalid%20input", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            """
-            INSERT INTO users (company_id, full_name, email, password_hash, password_salt, role, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (user["company_id"], clean_name, clean_email, hash_password(password, "bcrypt"), "bcrypt", role, datetime.utcnow().isoformat()),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
-        return RedirectResponse(url="/users?error=Email%20already%20exists", status_code=303)
-    conn.close()
-    return RedirectResponse(url="/users?saved=1", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute(
+                """
+                INSERT INTO users (company_id, full_name, email, password_hash, password_salt, role, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (user["company_id"], clean_name, clean_email, hash_password(password, "bcrypt"), "bcrypt", role, datetime.utcnow().isoformat()),
+            )
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            return RedirectResponse(url="/users?error=Email%20already%20exists", status_code=303)
+        return RedirectResponse(url="/users?saved=1", status_code=303)
+    
+    
 @app.post("/users/{user_id}/role")
 async def users_set_role(request: Request, user_id: int, role: str = Form(...)):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2098,14 +2085,12 @@ async def users_set_role(request: Request, user_id: int, role: str = Form(...)):
         return render_message(request, "Security Error", "Invalid security token.", "/users", user)
     if role not in VALID_ROLES:
         return RedirectResponse(url="/users?error=Invalid%20role", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET role=? WHERE id=? AND company_id=?", (role, user_id, user["company_id"]))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/users?saved=1", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("UPDATE users SET role=%s WHERE id=%s AND company_id=%s", (role, user_id, user["company_id"]))
+        return RedirectResponse(url="/users?saved=1", status_code=303)
+    
+    
 @app.post("/users/{user_id}/delete")
 async def users_delete(request: Request, user_id: int):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2115,15 +2100,13 @@ async def users_delete(request: Request, user_id: int):
         return render_message(request, "Security Error", "Invalid security token.", "/users", user)
     if user["user_id"] == user_id:
         return RedirectResponse(url="/users?error=You%20cannot%20delete%20yourself", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE id=? AND company_id=?)", (user_id, user["company_id"]))
-    cursor.execute("DELETE FROM users WHERE id=? AND company_id=?", (user_id, user["company_id"]))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/users?saved=1", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE id=%s AND company_id=%s)", (user_id, user["company_id"]))
+        cursor.execute("DELETE FROM users WHERE id=%s AND company_id=%s", (user_id, user["company_id"]))
+        return RedirectResponse(url="/users?saved=1", status_code=303)
+    
+    
 @app.post("/users/{user_id}/reset-password")
 async def users_reset_password(request: Request, user_id: int):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2133,24 +2116,21 @@ async def users_reset_password(request: Request, user_id: int):
         return render_message(request, "Security Error", "Invalid security token.", "/users", user)
 
     temp_password = secrets.token_urlsafe(8)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM users WHERE id=? AND company_id=?", (user_id, user["company_id"]))
-    target = cursor.fetchone()
-    if not target:
-        conn.close()
-        return RedirectResponse(url="/users?error=User%20not%20found", status_code=303)
-
-    cursor.execute(
-        "UPDATE users SET password_hash=?, password_salt='bcrypt', must_change_password=1 WHERE id=? AND company_id=?",
-        (hash_password(temp_password, "bcrypt"), user_id, user["company_id"]),
-    )
-    cursor.execute("DELETE FROM password_reset_requests WHERE user_id=? AND company_id=?", (user_id, user["company_id"]))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url=f"/users?saved=1&temp_password={temp_password}", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT id FROM users WHERE id=%s AND company_id=%s", (user_id, user["company_id"]))
+        target = cursor.fetchone()
+        if not target:
+            return RedirectResponse(url="/users?error=User%20not%20found", status_code=303)
+    
+        cursor.execute(
+            "UPDATE users SET password_hash=%s, password_salt='bcrypt', must_change_password=1 WHERE id=%s AND company_id=%s",
+            (hash_password(temp_password, "bcrypt"), user_id, user["company_id"]),
+        )
+        cursor.execute("DELETE FROM password_reset_requests WHERE user_id=%s AND company_id=%s", (user_id, user["company_id"]))
+        return RedirectResponse(url=f"/users?saved=1&temp_password={temp_password}", status_code=303)
+    
+    
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2212,49 +2192,47 @@ async def update_settings(request: Request):
         if err:
             return RedirectResponse(url=f"/settings?{urlencode({'error': err})}", status_code=303)
 
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        UPDATE companies
-        SET name=?, tagline=?, email=?, phone=?, address=?, vat_number=?, vat_percent=?, vat_enabled=?, default_discount_percent=?,
-            bank_name=?, bank_account_holder=?, bank_account_number=?, bank_account_type=?, bank_branch_code=?, bank_reference=?,
-            terms_and_conditions=?
-        WHERE id=?
-        """,
-        (
-            company_name,
-            tagline,
-            email,
-            phone,
-            address,
-            vat_number,
-            vat_percent,
-            vat_enabled,
-            default_discount_percent,
-            bank_name,
-            bank_account_holder,
-            bank_account_number,
-            bank_account_type,
-            bank_branch_code,
-            bank_reference,
-            terms_and_conditions,
-            user["company_id"],
-        ),
-    )
-    cursor.execute(
-        """
-        UPDATE company_settings
-        SET company_name=?, tagline=?, email=?, phone=?, address=?, vat_number=?, quote_footer=?
-        WHERE company_id=?
-        """,
-        (company_name, tagline, email, phone, address, vat_number, quote_footer, user["company_id"]),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/settings?saved=1", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            UPDATE companies
+            SET name=%s, tagline=%s, email=%s, phone=%s, address=%s, vat_number=%s, vat_percent=%s, vat_enabled=%s, default_discount_percent=%s,
+                bank_name=%s, bank_account_holder=%s, bank_account_number=%s, bank_account_type=%s, bank_branch_code=%s, bank_reference=%s,
+                terms_and_conditions=%s
+            WHERE id=%s
+            """,
+            (
+                company_name,
+                tagline,
+                email,
+                phone,
+                address,
+                vat_number,
+                vat_percent,
+                vat_enabled,
+                default_discount_percent,
+                bank_name,
+                bank_account_holder,
+                bank_account_number,
+                bank_account_type,
+                bank_branch_code,
+                bank_reference,
+                terms_and_conditions,
+                user["company_id"],
+            ),
+        )
+        cursor.execute(
+            """
+            UPDATE company_settings
+            SET company_name=%s, tagline=%s, email=%s, phone=%s, address=%s, vat_number=%s, quote_footer=%s
+            WHERE company_id=%s
+            """,
+            (company_name, tagline, email, phone, address, vat_number, quote_footer, user["company_id"]),
+        )
+        return RedirectResponse(url="/settings?saved=1", status_code=303)
+    
+    
 @app.get("/billing", response_class=HTMLResponse)
 def billing_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2268,114 +2246,112 @@ def quote_dashboard(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, quote_number, client_name, quote_date, total, status, created_at
-        FROM quotes
-        WHERE company_id=?
-        ORDER BY id DESC
-        """,
-        (user["company_id"],),
-    )
-    quotes = cursor.fetchall()
-    cursor.execute(
-        """
-        SELECT j.id, j.client_name, j.job_date, j.status, j.quote_id, q.quote_number
-        FROM jobs j
-        LEFT JOIN quotes q ON q.id = j.quote_id
-        WHERE j.company_id=?
-        ORDER BY j.id DESC
-        """,
-        (user["company_id"],),
-    )
-    jobs = cursor.fetchall()
-    cursor.execute("SELECT COUNT(*) AS c FROM quotes WHERE company_id=?", (user["company_id"],))
-    quote_total = int(cursor.fetchone()["c"] or 0)
-    cursor.execute(
-        """
-        SELECT
-            COALESCE(SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END), 0) AS a,
-            COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), 0) AS p,
-            COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), 0) AS r
-        FROM quotes
-        WHERE company_id=?
-        """,
-        (user["company_id"],),
-    )
-    st = cursor.fetchone()
-    approved_count = int(st["a"] or 0)
-    pending_count = int(st["p"] or 0)
-    rejected_count = int(st["r"] or 0)
-    conversion_pct = round((approved_count / quote_total) * 100, 1) if quote_total else 0.0
-    cursor.execute(
-        "SELECT COALESCE(SUM(total), 0) AS t FROM quotes WHERE company_id=? AND status='approved'",
-        (user["company_id"],),
-    )
-    approved_value = int(cursor.fetchone()["t"] or 0)
-    if has_column(cursor, "invoices", "amount_paid"):
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute(
             """
-            SELECT COALESCE(SUM(CASE WHEN payment_status IN ('unpaid', 'partial')
-                THEN (total - COALESCE(amount_paid, 0)) ELSE 0 END), 0) AS o
-            FROM invoices WHERE company_id=?
+            SELECT id, quote_number, client_name, quote_date, total, status, created_at
+            FROM quotes
+            WHERE company_id=%s
+            ORDER BY id DESC
             """,
             (user["company_id"],),
         )
-        outstanding_invoices = int(cursor.fetchone()["o"] or 0)
-    else:
-        outstanding_invoices = 0
-    conn.close()
-    err = request.query_params.get("error", "")
-    return templates.TemplateResponse(
-        request=request,
-        name="quote_dashboard.html",
-        context={
-            "title": "Quote Dashboard",
-            "quotes": quotes,
-            "jobs": jobs,
-            "current_user": user,
-            "error": err,
-            "quote_total": quote_total,
-            "approved_count": approved_count,
-            "pending_count": pending_count,
-            "rejected_count": rejected_count,
-            "conversion_pct": conversion_pct,
-            "approved_value": approved_value,
-            "outstanding_invoices": outstanding_invoices,
-        },
-    )
-
-
+        quotes = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT j.id, j.client_name, j.job_date, j.status, j.quote_id, q.quote_number
+            FROM jobs j
+            LEFT JOIN quotes q ON q.id = j.quote_id
+            WHERE j.company_id=%s
+            ORDER BY j.id DESC
+            """,
+            (user["company_id"],),
+        )
+        jobs = cursor.fetchall()
+        cursor.execute("SELECT COUNT(*) AS c FROM quotes WHERE company_id=%s", (user["company_id"],))
+        quote_total = int(cursor.fetchone()["c"] or 0)
+        cursor.execute(
+            """
+            SELECT
+                COALESCE(SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END), 0) AS a,
+                COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), 0) AS p,
+                COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END), 0) AS r
+            FROM quotes
+            WHERE company_id=%s
+            """,
+            (user["company_id"],),
+        )
+        st = cursor.fetchone()
+        approved_count = int(st["a"] or 0)
+        pending_count = int(st["p"] or 0)
+        rejected_count = int(st["r"] or 0)
+        conversion_pct = round((approved_count / quote_total) * 100, 1) if quote_total else 0.0
+        cursor.execute(
+            "SELECT COALESCE(SUM(total), 0) AS t FROM quotes WHERE company_id=%s AND status='approved'",
+            (user["company_id"],),
+        )
+        approved_value = int(cursor.fetchone()["t"] or 0)
+        if has_column(cursor, "invoices", "amount_paid"):
+            cursor.execute(
+                """
+                SELECT COALESCE(SUM(CASE WHEN payment_status IN ('unpaid', 'partial')
+                    THEN (total - COALESCE(amount_paid, 0)) ELSE 0 END), 0) AS o
+                FROM invoices WHERE company_id=%s
+                """,
+                (user["company_id"],),
+            )
+            outstanding_invoices = int(cursor.fetchone()["o"] or 0)
+        else:
+            outstanding_invoices = 0
+        err = request.query_params.get("error", "")
+        return templates.TemplateResponse(
+            request=request,
+            name="quote_dashboard.html",
+            context={
+                "title": "Quote Dashboard",
+                "quotes": quotes,
+                "jobs": jobs,
+                "current_user": user,
+                "error": err,
+                "quote_total": quote_total,
+                "approved_count": approved_count,
+                "pending_count": pending_count,
+                "rejected_count": rejected_count,
+                "conversion_pct": conversion_pct,
+                "approved_value": approved_value,
+                "outstanding_invoices": outstanding_invoices,
+            },
+        )
+    
+    
 @app.get("/quotes/{quote_id}/pdf")
 def quote_saved_pdf(request: Request, quote_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
     settings = get_company_settings(user["company_id"])
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM quotes WHERE id=? AND company_id=?", (quote_id, user["company_id"]))
-    qrow = cursor.fetchone()
-    conn.close()
-    if not qrow:
-        return render_message(request, "Quote Error", "Quote not found.", "/quotes/dashboard", user)
-    qdict = dict(qrow)
-    try:
-        lines = json.loads(qdict["line_items_json"])
-    except json.JSONDecodeError:
-        lines = []
-    if not isinstance(lines, list):
-        lines = []
-    client = qdict["client_name"]
-    date = qdict["quote_date"]
-    qnum = qdict["quote_number"]
-    fin = quote_financials_from_saved_row(qdict, lines)
-    meta = quote_meta_from_row(qdict, user["company_id"], client)
-    return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quotes/dashboard", quote_meta=meta)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM quotes WHERE id=%s AND company_id=%s", (quote_id, user["company_id"]))
+        qrow = cursor.fetchone()
+        if not qrow:
+            return render_message(request, "Quote Error", "Quote not found.", "/quotes/dashboard", user)
+        qdict = dict(qrow)
+        try:
+            lines = json.loads(qdict["line_items_json"])
+        except json.JSONDecodeError:
+            lines = []
+        if not isinstance(lines, list):
+            lines = []
+        client = qdict["client_name"]
+        date = qdict["quote_date"]
+        qnum = qdict["quote_number"]
+        fin = quote_financials_from_saved_row(qdict, lines)
+        meta = quote_meta_from_row(qdict, user["company_id"], client)
+        return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quotes/dashboard", quote_meta=meta)
+    
+    
 @app.post("/quotes/{quote_id}/approve")
 async def quote_approve(request: Request, quote_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2383,135 +2359,130 @@ async def quote_approve(request: Request, quote_id: int):
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", "/quotes/dashboard", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute(
-            "SELECT * FROM quotes WHERE id=? AND company_id=?",
-            (quote_id, user["company_id"]),
-        )
-        quote_row = cursor.fetchone()
-        if not quote_row or quote_row["status"] != "pending":
-            conn.rollback()
-            conn.close()
-            return RedirectResponse(url="/quotes/dashboard?error=Quote%20not%20found%20or%20already%20processed", status_code=303)
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
-            lines = json.loads(quote_row["line_items_json"])
-        except json.JSONDecodeError:
-            lines = []
-        ok, err = reserve_stock_for_quote_lines(cursor, user["company_id"], lines)
-        if not ok:
-            conn.rollback()
-            conn.close()
-            qe = urlencode({"error": err or "Could not reserve stock"})
-            return RedirectResponse(url=f"/quotes/dashboard?{qe}", status_code=303)
-        ok2, err2 = reserve_sub_rental_stock_for_quote_lines(cursor, user["company_id"], lines)
-        if not ok2:
-            conn.rollback()
-            conn.close()
-            qe = urlencode({"error": err2 or "Could not reserve sub-rental stock"})
-            return RedirectResponse(url=f"/quotes/dashboard?{qe}", status_code=303)
-        inv_num = next_invoice_number(cursor, user["company_id"])
-        due_date = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
-        created = datetime.utcnow().isoformat()
-        fin_inv = quote_financials_from_saved_row(dict(quote_row), lines)
-        cursor.execute(
-            """
-            INSERT INTO invoices (
-                company_id, invoice_number, quote_id, client_name, line_items_json, total, created_at, due_date, payment_status, amount_paid,
-                subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total
+            cursor.execute(
+                "SELECT * FROM quotes WHERE id=%s AND company_id=%s",
+                (quote_id, user["company_id"]),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unpaid', 0, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user["company_id"],
-                inv_num,
-                quote_id,
-                quote_row["client_name"],
-                quote_row["line_items_json"],
-                int(fin_inv["grand_total"]),
-                created,
-                due_date,
-                int(fin_inv["subtotal"]),
-                float(fin_inv["discount_percent"]),
-                int(fin_inv["discount_amount"]),
-                1 if fin_inv["vat_enabled"] else 0,
-                float(fin_inv["vat_percent"]),
-                int(fin_inv["vat_amount"]),
-                int(fin_inv["grand_total"]),
-            ),
-        )
-        invoice_id = cursor.lastrowid
-        cursor.execute(
-            """
-            INSERT INTO jobs (company_id, quote_id, invoice_id, client_name, job_date, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'upcoming', ?)
-            """,
-            (user["company_id"], quote_id, invoice_id, quote_row["client_name"], quote_row["quote_date"], created),
-        )
-        job_id = cursor.lastrowid
-        log_job_status_change(cursor, user["company_id"], job_id, None, "upcoming", user["user_id"])
-        for line in lines:
-            if quote_line_is_sub_rental(line):
-                qty = max(1, int(line.get("qty", 1) or 1))
-                try:
-                    sid = int(line.get("sub_rental_id"))
-                except (TypeError, ValueError):
+            quote_row = cursor.fetchone()
+            if not quote_row or quote_row["status"] != "pending":
+                conn.rollback()
+                return RedirectResponse(url="/quotes/dashboard?error=Quote%20not%20found%20or%20already%20processed", status_code=303)
+            try:
+                lines = json.loads(quote_row["line_items_json"])
+            except json.JSONDecodeError:
+                lines = []
+            ok, err = reserve_stock_for_quote_lines(cursor, user["company_id"], lines)
+            if not ok:
+                conn.rollback()
+                qe = urlencode({"error": err or "Could not reserve stock"})
+                return RedirectResponse(url=f"/quotes/dashboard?{qe}", status_code=303)
+            ok2, err2 = reserve_sub_rental_stock_for_quote_lines(cursor, user["company_id"], lines)
+            if not ok2:
+                conn.rollback()
+                qe = urlencode({"error": err2 or "Could not reserve sub-rental stock"})
+                return RedirectResponse(url=f"/quotes/dashboard?{qe}", status_code=303)
+            inv_num = next_invoice_number(cursor, user["company_id"])
+            due_date = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
+            created = datetime.utcnow().isoformat()
+            fin_inv = quote_financials_from_saved_row(dict(quote_row), lines)
+            cursor.execute(
+                """
+                INSERT INTO invoices (
+                    company_id, invoice_number, quote_id, client_name, line_items_json, total, created_at, due_date, payment_status, amount_paid,
+                    subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'unpaid', 0, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    user["company_id"],
+                    inv_num,
+                    quote_id,
+                    quote_row["client_name"],
+                    quote_row["line_items_json"],
+                    int(fin_inv["grand_total"]),
+                    created,
+                    due_date,
+                    int(fin_inv["subtotal"]),
+                    float(fin_inv["discount_percent"]),
+                    int(fin_inv["discount_amount"]),
+                    1 if fin_inv["vat_enabled"] else 0,
+                    float(fin_inv["vat_percent"]),
+                    int(fin_inv["vat_amount"]),
+                    int(fin_inv["grand_total"]),
+                ),
+            )
+            invoice_id = cursor.fetchone()["id"]
+            cursor.execute(
+                """
+                INSERT INTO jobs (company_id, quote_id, invoice_id, client_name, job_date, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, 'upcoming', %s)
+                RETURNING id
+                """,
+                (user["company_id"], quote_id, invoice_id, quote_row["client_name"], quote_row["quote_date"], created),
+            )
+            job_id = cursor.fetchone()["id"]
+            log_job_status_change(cursor, user["company_id"], job_id, None, "upcoming", user["user_id"])
+            for line in lines:
+                if quote_line_is_sub_rental(line):
+                    qty = max(1, int(line.get("qty", 1) or 1))
+                    try:
+                        sid = int(line.get("sub_rental_id"))
+                    except (TypeError, ValueError):
+                        continue
+                    desc = str(line.get("name", "")).strip()
+                    supplier = str(line.get("supplier_name", "")).strip()
+                    show_raw = line.get("show_on_quote", 0)
+                    show_on = 1 if show_raw in (1, True, "1", "yes", "Yes", "true", "True") else 0
+                    cursor.execute(
+                        """
+                        INSERT INTO job_prep_items (company_id, job_id, equipment_id, equipment_name, quantity, packed, line_type, sub_rental_id, supplier_name, received_from_supplier)
+                        VALUES (%s, %s, NULL, %s, %s, 0, 'sub_rental', %s, %s, 0)
+                        """,
+                        (user["company_id"], job_id, desc or "Sub-rental", qty, sid, supplier),
+                    )
+                    cursor.execute(
+                        """
+                        INSERT INTO sub_rental_usage (company_id, sub_rental_id, job_id, units_used, show_on_quote)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        (user["company_id"], sid, job_id, qty, show_on),
+                    )
                     continue
-                desc = str(line.get("name", "")).strip()
-                supplier = str(line.get("supplier_name", "")).strip()
-                show_raw = line.get("show_on_quote", 0)
-                show_on = 1 if show_raw in (1, True, "1", "yes", "Yes", "true", "True") else 0
+                name = str(line.get("name", "")).strip()
+                qty = int(line.get("qty", 1) or 1)
+                if not name:
+                    continue
+                eid = line.get("equipment_id")
+                if eid:
+                    try:
+                        eid = int(eid)
+                    except (TypeError, ValueError):
+                        eid = None
+                if not eid:
+                    cursor.execute(
+                        "SELECT id FROM equipment WHERE company_id=%s AND name=%s ORDER BY id ASC LIMIT 1",
+                        (user["company_id"], name),
+                    )
+                    fr = cursor.fetchone()
+                    eid = int(fr["id"]) if fr else None
                 cursor.execute(
                     """
                     INSERT INTO job_prep_items (company_id, job_id, equipment_id, equipment_name, quantity, packed, line_type, sub_rental_id, supplier_name, received_from_supplier)
-                    VALUES (?, ?, NULL, ?, ?, 0, 'sub_rental', ?, ?, 0)
+                    VALUES (%s, %s, %s, %s, %s, 0, 'owned', NULL, NULL, 0)
                     """,
-                    (user["company_id"], job_id, desc or "Sub-rental", qty, sid, supplier),
+                    (user["company_id"], job_id, eid, name, max(1, qty)),
                 )
-                cursor.execute(
-                    """
-                    INSERT INTO sub_rental_usage (company_id, sub_rental_id, job_id, units_used, show_on_quote)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (user["company_id"], sid, job_id, qty, show_on),
-                )
-                continue
-            name = str(line.get("name", "")).strip()
-            qty = int(line.get("qty", 1) or 1)
-            if not name:
-                continue
-            eid = line.get("equipment_id")
-            if eid:
-                try:
-                    eid = int(eid)
-                except (TypeError, ValueError):
-                    eid = None
-            if not eid:
-                cursor.execute(
-                    "SELECT id FROM equipment WHERE company_id=? AND name=? ORDER BY id ASC LIMIT 1",
-                    (user["company_id"], name),
-                )
-                fr = cursor.fetchone()
-                eid = int(fr["id"]) if fr else None
-            cursor.execute(
-                """
-                INSERT INTO job_prep_items (company_id, job_id, equipment_id, equipment_name, quantity, packed, line_type, sub_rental_id, supplier_name, received_from_supplier)
-                VALUES (?, ?, ?, ?, ?, 0, 'owned', NULL, NULL, 0)
-                """,
-                (user["company_id"], job_id, eid, name, max(1, qty)),
-            )
-        cursor.execute("UPDATE quotes SET status='approved' WHERE id=? AND company_id=?", (quote_id, user["company_id"]))
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    return RedirectResponse(url="/quotes/dashboard", status_code=303)
-
-
+            cursor.execute("UPDATE quotes SET status='approved' WHERE id=%s AND company_id=%s", (quote_id, user["company_id"]))
+        except Exception:
+            conn.rollback()
+            raise
+        return RedirectResponse(url="/quotes/dashboard", status_code=303)
+    
+    
 @app.post("/quotes/{quote_id}/reject")
 async def quote_reject(request: Request, quote_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2519,116 +2490,108 @@ async def quote_reject(request: Request, quote_id: int):
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", "/quotes/dashboard", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id FROM quotes WHERE id=? AND company_id=? AND status='pending'",
-        (quote_id, user["company_id"]),
-    )
-    if not cursor.fetchone():
-        conn.close()
-        return RedirectResponse(url="/quotes/dashboard?error=Quote%20not%20found%20or%20already%20processed", status_code=303)
-    cursor.execute("UPDATE quotes SET status='rejected' WHERE id=? AND company_id=?", (quote_id, user["company_id"]))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/quotes/dashboard", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT id FROM quotes WHERE id=%s AND company_id=%s AND status='pending'",
+            (quote_id, user["company_id"]),
+        )
+        if not cursor.fetchone():
+            return RedirectResponse(url="/quotes/dashboard?error=Quote%20not%20found%20or%20already%20processed", status_code=303)
+        cursor.execute("UPDATE quotes SET status='rejected' WHERE id=%s AND company_id=%s", (quote_id, user["company_id"]))
+        return RedirectResponse(url="/quotes/dashboard", status_code=303)
+    
+    
 @app.get("/jobs", response_class=HTMLResponse)
 def jobs_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT j.id, j.client_name, j.job_date, j.status, j.quote_id, q.quote_number
-        FROM jobs j
-        LEFT JOIN quotes q ON q.id = j.quote_id
-        WHERE j.company_id=?
-        ORDER BY j.job_date DESC, j.id DESC
-        """,
-        (user["company_id"],),
-    )
-    jobs = cursor.fetchall()
-    conn.close()
-    return templates.TemplateResponse(
-        request=request,
-        name="jobs.html",
-        context={
-            "title": "Jobs",
-            "jobs": jobs,
-            "current_user": user,
-            "job_statuses": ["upcoming", "active", "done"],
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT j.id, j.client_name, j.job_date, j.status, j.quote_id, q.quote_number
+            FROM jobs j
+            LEFT JOIN quotes q ON q.id = j.quote_id
+            WHERE j.company_id=%s
+            ORDER BY j.job_date DESC, j.id DESC
+            """,
+            (user["company_id"],),
+        )
+        jobs = cursor.fetchall()
+        return templates.TemplateResponse(
+            request=request,
+            name="jobs.html",
+            context={
+                "title": "Jobs",
+                "jobs": jobs,
+                "current_user": user,
+                "job_statuses": ["upcoming", "active", "done"],
+            },
+        )
+    
+    
 @app.get("/warehouse", response_class=HTMLResponse)
 def warehouse_dashboard(request: Request):
     user, response = get_current_user(request, allowed_roles={"warehouse"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT j.id, j.client_name, j.job_date, j.status,
-               (SELECT COUNT(*) FROM job_prep_items jpi WHERE jpi.job_id = j.id AND jpi.company_id = j.company_id) AS item_count
-        FROM jobs j
-        WHERE j.company_id=? AND j.status IN ('upcoming', 'active')
-        ORDER BY j.job_date ASC, j.id ASC
-        """,
-        (user["company_id"],),
-    )
-    jobs = cursor.fetchall()
-    conn.close()
-    return templates.TemplateResponse(
-        request=request,
-        name="warehouse.html",
-        context={"title": "Warehouse", "jobs": jobs, "current_user": user},
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT j.id, j.client_name, j.job_date, j.status,
+                   (SELECT COUNT(*) FROM job_prep_items jpi WHERE jpi.job_id = j.id AND jpi.company_id = j.company_id) AS item_count
+            FROM jobs j
+            WHERE j.company_id=%s AND j.status IN ('upcoming', 'active')
+            ORDER BY j.job_date ASC, j.id ASC
+            """,
+            (user["company_id"],),
+        )
+        jobs = cursor.fetchall()
+        return templates.TemplateResponse(
+            request=request,
+            name="warehouse.html",
+            context={"title": "Warehouse", "jobs": jobs, "current_user": user},
+        )
+    
+    
 @app.get("/warehouse/job/{job_id}", response_class=HTMLResponse)
 def warehouse_job_prep(request: Request, job_id: int):
     user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM jobs WHERE id=? AND company_id=?",
-        (job_id, user["company_id"]),
-    )
-    job = cursor.fetchone()
-    if not job:
-        conn.close()
-        return render_message(request, "Not found", "Job not found.", "/warehouse" if user["role"] == "warehouse" else "/jobs", user)
-    if user["role"] == "warehouse" and job["status"] not in ("upcoming", "active"):
-        conn.close()
-        return render_message(request, "Not available", "This job is not available for prep.", "/warehouse", user)
-    cursor.execute(
-        "SELECT * FROM job_prep_items WHERE job_id=? AND company_id=? ORDER BY id ASC",
-        (job_id, user["company_id"]),
-    )
-    prep_items = cursor.fetchall()
-    conn.close()
-    back_url = "/warehouse" if user["role"] == "warehouse" else "/jobs"
-    return templates.TemplateResponse(
-        request=request,
-        name="warehouse_job.html",
-        context={
-            "title": f"Prep — Job #{job_id}",
-            "job": job,
-            "prep_items": prep_items,
-            "current_user": user,
-            "back_url": back_url,
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM jobs WHERE id=%s AND company_id=%s",
+            (job_id, user["company_id"]),
+        )
+        job = cursor.fetchone()
+        if not job:
+            return render_message(request, "Not found", "Job not found.", "/warehouse" if user["role"] == "warehouse" else "/jobs", user)
+        if user["role"] == "warehouse" and job["status"] not in ("upcoming", "active"):
+            return render_message(request, "Not available", "This job is not available for prep.", "/warehouse", user)
+        cursor.execute(
+            "SELECT * FROM job_prep_items WHERE job_id=%s AND company_id=%s ORDER BY id ASC",
+            (job_id, user["company_id"]),
+        )
+        prep_items = cursor.fetchall()
+        back_url = "/warehouse" if user["role"] == "warehouse" else "/jobs"
+        return templates.TemplateResponse(
+            request=request,
+            name="warehouse_job.html",
+            context={
+                "title": f"Prep — Job #{job_id}",
+                "job": job,
+                "prep_items": prep_items,
+                "current_user": user,
+                "back_url": back_url,
+            },
+        )
+    
+    
 @app.post("/warehouse/job/{job_id}/status")
 async def warehouse_job_set_status(request: Request, job_id: int, job_status: str = Form(...)):
     user, response = get_current_user(request, allowed_roles={"warehouse"})
@@ -2638,38 +2601,31 @@ async def warehouse_job_set_status(request: Request, job_id: int, job_status: st
         return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
     if job_status not in JOB_STATUSES:
         return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20status", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT status FROM jobs WHERE id=? AND company_id=?", (job_id, user["company_id"]))
-        row = cursor.fetchone()
-        if not row:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute("SELECT status FROM jobs WHERE id=%s AND company_id=%s", (job_id, user["company_id"]))
+            row = cursor.fetchone()
+            if not row:
+                conn.rollback()
+                return RedirectResponse(url="/warehouse?error=Job%20not%20found", status_code=303)
+            old = row["status"]
+            if not warehouse_may_set_job_status(old, job_status):
+                conn.rollback()
+                return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20status%20change", status_code=303)
+            ok, err = process_job_status_stock_delta(cursor, user["company_id"], job_id, old, job_status)
+            if not ok:
+                conn.rollback()
+                qe = urlencode({"error": err or "Not enough units available"})
+                return RedirectResponse(url=f"/warehouse/job/{job_id}?{qe}", status_code=303)
+            cursor.execute("UPDATE jobs SET status=%s WHERE id=%s AND company_id=%s", (job_status, job_id, user["company_id"]))
+            log_job_status_change(cursor, user["company_id"], job_id, old, job_status, user["user_id"])
+        except Exception:
             conn.rollback()
-            conn.close()
-            return RedirectResponse(url="/warehouse?error=Job%20not%20found", status_code=303)
-        old = row["status"]
-        if not warehouse_may_set_job_status(old, job_status):
-            conn.rollback()
-            conn.close()
-            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20status%20change", status_code=303)
-        ok, err = process_job_status_stock_delta(cursor, user["company_id"], job_id, old, job_status)
-        if not ok:
-            conn.rollback()
-            conn.close()
-            qe = urlencode({"error": err or "Not enough units available"})
-            return RedirectResponse(url=f"/warehouse/job/{job_id}?{qe}", status_code=303)
-        cursor.execute("UPDATE jobs SET status=? WHERE id=? AND company_id=?", (job_status, job_id, user["company_id"]))
-        log_job_status_change(cursor, user["company_id"], job_id, old, job_status, user["user_id"])
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
-
-
+            raise
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+    
+    
 @app.post("/jobs/{job_id}/status")
 async def management_job_set_status(request: Request, job_id: int, job_status: str = Form(...), redirect_to: str = Form(default="/jobs")):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2679,40 +2635,33 @@ async def management_job_set_status(request: Request, job_id: int, job_status: s
         return render_message(request, "Security Error", "Invalid security token.", "/jobs", user)
     if job_status not in JOB_STATUSES:
         return RedirectResponse(url="/jobs?error=Invalid%20status", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT status FROM jobs WHERE id=? AND company_id=?", (job_id, user["company_id"]))
-        row = cursor.fetchone()
-        if not row:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute("SELECT status FROM jobs WHERE id=%s AND company_id=%s", (job_id, user["company_id"]))
+            row = cursor.fetchone()
+            if not row:
+                conn.rollback()
+                return RedirectResponse(url="/jobs?error=Job%20not%20found", status_code=303)
+            old = row["status"]
+            if old == job_status:
+                conn.rollback()
+                safe_next = redirect_to if redirect_to.startswith("/") and not redirect_to.startswith("//") else "/jobs"
+                return RedirectResponse(url=safe_next, status_code=303)
+            ok, err = process_job_status_stock_delta(cursor, user["company_id"], job_id, old, job_status)
+            if not ok:
+                conn.rollback()
+                qe = urlencode({"error": err or "Not enough units available"})
+                return RedirectResponse(url=f"/jobs?{qe}", status_code=303)
+            cursor.execute("UPDATE jobs SET status=%s WHERE id=%s AND company_id=%s", (job_status, job_id, user["company_id"]))
+            log_job_status_change(cursor, user["company_id"], job_id, old, job_status, user["user_id"])
+        except Exception:
             conn.rollback()
-            conn.close()
-            return RedirectResponse(url="/jobs?error=Job%20not%20found", status_code=303)
-        old = row["status"]
-        if old == job_status:
-            conn.rollback()
-            conn.close()
-            safe_next = redirect_to if redirect_to.startswith("/") and not redirect_to.startswith("//") else "/jobs"
-            return RedirectResponse(url=safe_next, status_code=303)
-        ok, err = process_job_status_stock_delta(cursor, user["company_id"], job_id, old, job_status)
-        if not ok:
-            conn.rollback()
-            conn.close()
-            qe = urlencode({"error": err or "Not enough units available"})
-            return RedirectResponse(url=f"/jobs?{qe}", status_code=303)
-        cursor.execute("UPDATE jobs SET status=? WHERE id=? AND company_id=?", (job_status, job_id, user["company_id"]))
-        log_job_status_change(cursor, user["company_id"], job_id, old, job_status, user["user_id"])
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    safe_next = redirect_to if redirect_to.startswith("/") and not redirect_to.startswith("//") else "/jobs"
-    return RedirectResponse(url=safe_next, status_code=303)
-
-
+            raise
+        safe_next = redirect_to if redirect_to.startswith("/") and not redirect_to.startswith("//") else "/jobs"
+        return RedirectResponse(url=safe_next, status_code=303)
+    
+    
 @app.post("/warehouse/job/{job_id}/prep/{prep_item_id}/toggle")
 async def warehouse_prep_toggle(request: Request, job_id: int, prep_item_id: int):
     user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
@@ -2720,26 +2669,23 @@ async def warehouse_prep_toggle(request: Request, job_id: int, prep_item_id: int
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT packed FROM job_prep_items WHERE id=? AND job_id=? AND company_id=?",
-        (prep_item_id, job_id, user["company_id"]),
-    )
-    row = cursor.fetchone()
-    if not row:
-        conn.close()
-        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Item%20not%20found", status_code=303)
-    new_packed = 0 if row["packed"] else 1
-    cursor.execute(
-        "UPDATE job_prep_items SET packed=? WHERE id=? AND job_id=? AND company_id=?",
-        (new_packed, prep_item_id, job_id, user["company_id"]),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT packed FROM job_prep_items WHERE id=%s AND job_id=%s AND company_id=%s",
+            (prep_item_id, job_id, user["company_id"]),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Item%20not%20found", status_code=303)
+        new_packed = 0 if row["packed"] else 1
+        cursor.execute(
+            "UPDATE job_prep_items SET packed=%s WHERE id=%s AND job_id=%s AND company_id=%s",
+            (new_packed, prep_item_id, job_id, user["company_id"]),
+        )
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+    
+    
 @app.post("/warehouse/job/{job_id}/prep/{prep_item_id}/received")
 async def warehouse_prep_received_toggle(request: Request, job_id: int, prep_item_id: int):
     user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
@@ -2747,26 +2693,23 @@ async def warehouse_prep_received_toggle(request: Request, job_id: int, prep_ite
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT received_from_supplier, line_type FROM job_prep_items WHERE id=? AND job_id=? AND company_id=?",
-        (prep_item_id, job_id, user["company_id"]),
-    )
-    row = cursor.fetchone()
-    if not row or (row["line_type"] or "owned") != "sub_rental":
-        conn.close()
-        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Item%20not%20found", status_code=303)
-    new_val = 0 if int(row["received_from_supplier"] or 0) else 1
-    cursor.execute(
-        "UPDATE job_prep_items SET received_from_supplier=? WHERE id=? AND job_id=? AND company_id=?",
-        (new_val, prep_item_id, job_id, user["company_id"]),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT received_from_supplier, line_type FROM job_prep_items WHERE id=%s AND job_id=%s AND company_id=%s",
+            (prep_item_id, job_id, user["company_id"]),
+        )
+        row = cursor.fetchone()
+        if not row or (row["line_type"] or "owned") != "sub_rental":
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Item%20not%20found", status_code=303)
+        new_val = 0 if int(row["received_from_supplier"] or 0) else 1
+        cursor.execute(
+            "UPDATE job_prep_items SET received_from_supplier=%s WHERE id=%s AND job_id=%s AND company_id=%s",
+            (new_val, prep_item_id, job_id, user["company_id"]),
+        )
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+    
+    
 @app.post("/quotes/dashboard/job/{job_id}/status")
 async def quote_dashboard_job_status(request: Request, job_id: int, job_status: str = Form(...)):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2776,35 +2719,29 @@ async def quote_dashboard_job_status(request: Request, job_id: int, job_status: 
         return render_message(request, "Security Error", "Invalid security token.", "/quotes/dashboard", user)
     if job_status not in JOB_STATUSES:
         return RedirectResponse(url="/quotes/dashboard?error=Invalid%20status", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT status FROM jobs WHERE id=? AND company_id=?", (job_id, user["company_id"]))
-        row = cursor.fetchone()
-        if not row:
-            conn.rollback()
-            conn.close()
-            return RedirectResponse(url="/quotes/dashboard?error=Job%20not%20found", status_code=303)
-        old = row["status"]
-        if old != job_status:
-            ok, err = process_job_status_stock_delta(cursor, user["company_id"], job_id, old, job_status)
-            if not ok:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute("SELECT status FROM jobs WHERE id=%s AND company_id=%s", (job_id, user["company_id"]))
+            row = cursor.fetchone()
+            if not row:
                 conn.rollback()
-                conn.close()
-                qe = urlencode({"error": err or "Not enough units available"})
-                return RedirectResponse(url=f"/quotes/dashboard?{qe}", status_code=303)
-            cursor.execute("UPDATE jobs SET status=? WHERE id=? AND company_id=?", (job_status, job_id, user["company_id"]))
-            log_job_status_change(cursor, user["company_id"], job_id, old, job_status, user["user_id"])
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    return RedirectResponse(url="/quotes/dashboard", status_code=303)
-
-
+                return RedirectResponse(url="/quotes/dashboard?error=Job%20not%20found", status_code=303)
+            old = row["status"]
+            if old != job_status:
+                ok, err = process_job_status_stock_delta(cursor, user["company_id"], job_id, old, job_status)
+                if not ok:
+                    conn.rollback()
+                    qe = urlencode({"error": err or "Not enough units available"})
+                    return RedirectResponse(url=f"/quotes/dashboard?{qe}", status_code=303)
+                cursor.execute("UPDATE jobs SET status=%s WHERE id=%s AND company_id=%s", (job_status, job_id, user["company_id"]))
+                log_job_status_change(cursor, user["company_id"], job_id, old, job_status, user["user_id"])
+        except Exception:
+            conn.rollback()
+            raise
+        return RedirectResponse(url="/quotes/dashboard", status_code=303)
+    
+    
 @app.get("/add", response_class=HTMLResponse)
 def add_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2827,32 +2764,29 @@ async def add_equipment(request: Request, name: str = Form(...), price: int = Fo
         return RedirectResponse(url="/add?error=Price%20must%20be%200%20or%20more", status_code=303)
     if quantity < 1:
         return RedirectResponse(url="/add?error=Quantity%20must%20be%20at%20least%201", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO equipment (name, status, price, prep_status, company_id, quantity, quantity_rented) VALUES (?, ?, ?, ?, ?, ?, 0)",
-        (clean_name, "available", price, "pending", user["company_id"], quantity),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "INSERT INTO equipment (name, status, price, prep_status, company_id, quantity, quantity_rented) VALUES (%s, %s, %s, %s, %s, %s, 0)",
+            (clean_name, "available", price, "pending", user["company_id"], quantity),
+        )
+        return RedirectResponse(url="/", status_code=303)
+    
+    
 @app.get("/equipment/{item_id}/edit", response_class=HTMLResponse)
 def edit_equipment_page(request: Request, item_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-    item = cursor.fetchone()
-    conn.close()
-    if not item:
-        return render_message(request, "Error", "Equipment not found.", "/", user)
-    return templates.TemplateResponse(request=request, name="equipment_edit.html", context={"title": "Edit Equipment", "item": item, "current_user": user})
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+        item = cursor.fetchone()
+        if not item:
+            return render_message(request, "Error", "Equipment not found.", "/", user)
+        return templates.TemplateResponse(request=request, name="equipment_edit.html", context={"title": "Edit Equipment", "item": item, "current_user": user})
+    
+    
 @app.post("/equipment/{item_id}/edit")
 async def edit_equipment(request: Request, item_id: int, name: str = Form(...), price: int = Form(...), quantity: int = Form(...)):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2867,23 +2801,20 @@ async def edit_equipment(request: Request, item_id: int, name: str = Form(...), 
         return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Price%20must%20be%200%20or%20more", status_code=303)
     if quantity < 1:
         return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Quantity%20must%20be%20at%20least%201", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT quantity_rented FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-    cur = cursor.fetchone()
-    if not cur:
-        conn.close()
-        return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Not%20found", status_code=303)
-    qr = int(cur["quantity_rented"] or 0)
-    if quantity < qr:
-        return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Quantity%20cannot%20be%20less%20than%20rented%20units", status_code=303)
-    cursor.execute("UPDATE equipment SET name=?, price=?, quantity=? WHERE id=? AND company_id=?", (clean_name, price, quantity, item_id, user["company_id"]))
-    sync_equipment_row(cursor, item_id, user["company_id"])
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT quantity_rented FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+        cur = cursor.fetchone()
+        if not cur:
+            return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Not%20found", status_code=303)
+        qr = int(cur["quantity_rented"] or 0)
+        if quantity < qr:
+            return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Quantity%20cannot%20be%20less%20than%20rented%20units", status_code=303)
+        cursor.execute("UPDATE equipment SET name=%s, price=%s, quantity=%s WHERE id=%s AND company_id=%s", (clean_name, price, quantity, item_id, user["company_id"]))
+        sync_equipment_row(cursor, item_id, user["company_id"])
+        return RedirectResponse(url="/", status_code=303)
+    
+    
 @app.post("/equipment/{item_id}/delete")
 async def delete_equipment(request: Request, item_id: int):
     user, response = get_current_user(request, allowed_roles={"admin"})
@@ -2891,32 +2822,29 @@ async def delete_equipment(request: Request, item_id: int):
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", "/", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("DELETE FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+        return RedirectResponse(url="/", status_code=303)
+    
+    
 @app.get("/clients", response_class=HTMLResponse)
 def clients_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC", (user["company_id"],))
-    clients = cursor.fetchall()
-    conn.close()
-    err = request.query_params.get("error", "")
-    return templates.TemplateResponse(
-        request=request,
-        name="clients.html",
-        context={"title": "Clients", "clients": clients, "current_user": user, "error": err},
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM clients WHERE company_id=%s ORDER BY name ASC", (user["company_id"],))
+        clients = cursor.fetchall()
+        err = request.query_params.get("error", "")
+        return templates.TemplateResponse(
+            request=request,
+            name="clients.html",
+            context={"title": "Clients", "clients": clients, "current_user": user, "error": err},
+        )
+    
+    
 @app.post("/clients")
 async def add_client(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2933,20 +2861,18 @@ async def add_client(request: Request):
     email = str(form.get("email", "")).strip()
     address = str(form.get("address", "")).strip()
     vat_number = str(form.get("vat_number", "")).strip()
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO clients (name, company_id, contact_person, phone, email, address, vat_number)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (clean_name, user["company_id"], contact_person, phone, email, address, vat_number),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/clients", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            INSERT INTO clients (name, company_id, contact_person, phone, email, address, vat_number)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (clean_name, user["company_id"], contact_person, phone, email, address, vat_number),
+        )
+        return RedirectResponse(url="/clients", status_code=303)
+    
+    
 @app.get("/clients/{client_id}/details")
 def client_details_json(request: Request, client_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2963,21 +2889,20 @@ def client_edit_page(request: Request, client_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM clients WHERE id=? AND company_id=?", (client_id, user["company_id"]))
-    client = cursor.fetchone()
-    conn.close()
-    if not client:
-        return render_message(request, "Error", "Client not found.", "/clients", user)
-    err = request.query_params.get("error", "")
-    return templates.TemplateResponse(
-        request=request,
-        name="client_edit.html",
-        context={"title": "Edit Client", "client": client, "current_user": user, "error": err},
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM clients WHERE id=%s AND company_id=%s", (client_id, user["company_id"]))
+        client = cursor.fetchone()
+        if not client:
+            return render_message(request, "Error", "Client not found.", "/clients", user)
+        err = request.query_params.get("error", "")
+        return templates.TemplateResponse(
+            request=request,
+            name="client_edit.html",
+            context={"title": "Edit Client", "client": client, "current_user": user, "error": err},
+        )
+    
+    
 @app.post("/clients/{client_id}/edit")
 async def client_edit_save(request: Request, client_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -2994,46 +2919,42 @@ async def client_edit_save(request: Request, client_id: int):
     email = str(form.get("email", "")).strip()
     address = str(form.get("address", "")).strip()
     vat_number = str(form.get("vat_number", "")).strip()
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM clients WHERE id=? AND company_id=?", (client_id, user["company_id"]))
-    if not cursor.fetchone():
-        conn.close()
-        return RedirectResponse(url="/clients?error=Not%20found", status_code=303)
-    cursor.execute(
-        """
-        UPDATE clients
-        SET name=?, contact_person=?, phone=?, email=?, address=?, vat_number=?
-        WHERE id=? AND company_id=?
-        """,
-        (clean_name, contact_person, phone, email, address, vat_number, client_id, user["company_id"]),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/clients", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT id FROM clients WHERE id=%s AND company_id=%s", (client_id, user["company_id"]))
+        if not cursor.fetchone():
+            return RedirectResponse(url="/clients?error=Not%20found", status_code=303)
+        cursor.execute(
+            """
+            UPDATE clients
+            SET name=%s, contact_person=%s, phone=%s, email=%s, address=%s, vat_number=%s
+            WHERE id=%s AND company_id=%s
+            """,
+            (clean_name, contact_person, phone, email, address, vat_number, client_id, user["company_id"]),
+        )
+        return RedirectResponse(url="/clients", status_code=303)
+    
+    
 @app.get("/sub-rentals", response_class=HTMLResponse)
 def sub_rentals_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT * FROM sub_rentals WHERE company_id=? ORDER BY id DESC",
-        (user["company_id"],),
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    err = request.query_params.get("error", "")
-    return templates.TemplateResponse(
-        request=request,
-        name="sub_rentals.html",
-        context={"title": "Sub-Rental Management", "rows": rows, "current_user": user, "error": err},
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT * FROM sub_rentals WHERE company_id=%s ORDER BY id DESC",
+            (user["company_id"],),
+        )
+        rows = cursor.fetchall()
+        err = request.query_params.get("error", "")
+        return templates.TemplateResponse(
+            request=request,
+            name="sub_rentals.html",
+            context={"title": "Sub-Rental Management", "rows": rows, "current_user": user, "error": err},
+        )
+    
+    
 @app.post("/sub-rentals")
 async def sub_rentals_add(
     request: Request,
@@ -3057,39 +2978,36 @@ async def sub_rentals_add(
     if cost_per_unit < 0:
         return RedirectResponse(url="/sub-rentals?error=Cost%20per%20unit%20must%20be%200%20or%20more", status_code=303)
     created = datetime.utcnow().isoformat()
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        INSERT INTO sub_rentals (company_id, supplier_name, equipment_description, quantity_total, quantity_available, cost_per_unit, notes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (user["company_id"], sup, desc, quantity_total, quantity_total, cost_per_unit, notes.strip(), created),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/sub-rentals", status_code=303)
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            INSERT INTO sub_rentals (company_id, supplier_name, equipment_description, quantity_total, quantity_available, cost_per_unit, notes, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (user["company_id"], sup, desc, quantity_total, quantity_total, cost_per_unit, notes.strip(), created),
+        )
+        return RedirectResponse(url="/sub-rentals", status_code=303)
+    
+    
 @app.get("/sub-rentals/{sub_id}/edit", response_class=HTMLResponse)
 def sub_rental_edit_page(request: Request, sub_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM sub_rentals WHERE id=? AND company_id=?", (sub_id, user["company_id"]))
-    row = cursor.fetchone()
-    conn.close()
-    if not row:
-        return render_message(request, "Error", "Sub-rental item not found.", "/sub-rentals", user)
-    return templates.TemplateResponse(
-        request=request,
-        name="sub_rental_edit.html",
-        context={"title": "Edit Sub-Rental", "item": row, "current_user": user},
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM sub_rentals WHERE id=%s AND company_id=%s", (sub_id, user["company_id"]))
+        row = cursor.fetchone()
+        if not row:
+            return render_message(request, "Error", "Sub-rental item not found.", "/sub-rentals", user)
+        return templates.TemplateResponse(
+            request=request,
+            name="sub_rental_edit.html",
+            context={"title": "Edit Sub-Rental", "item": row, "current_user": user},
+        )
+    
+    
 @app.post("/sub-rentals/{sub_id}/edit")
 async def sub_rental_edit_save(
     request: Request,
@@ -3113,37 +3031,33 @@ async def sub_rental_edit_save(
         return RedirectResponse(url=f"/sub-rentals/{sub_id}/edit?error=Total%20units%20must%20be%20at%20least%201", status_code=303)
     if cost_per_unit < 0:
         return RedirectResponse(url=f"/sub-rentals/{sub_id}/edit?error=Cost%20invalid", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM sub_rentals WHERE id=? AND company_id=?", (sub_id, user["company_id"]))
-    cur = cursor.fetchone()
-    if not cur:
-        conn.close()
-        return RedirectResponse(url="/sub-rentals?error=Not%20found", status_code=303)
-    old_total = int(cur["quantity_total"] or 0)
-    old_avail = int(cur["quantity_available"] or 0)
-    in_use = max(0, old_total - old_avail)
-    new_total = quantity_total
-    new_avail = new_total - in_use
-    if new_avail < 0:
-        conn.close()
-        return RedirectResponse(
-            url=f"/sub-rentals/{sub_id}/edit?error=Total%20units%20cannot%20be%20less%20than%20units%20already%20allocated",
-            status_code=303,
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM sub_rentals WHERE id=%s AND company_id=%s", (sub_id, user["company_id"]))
+        cur = cursor.fetchone()
+        if not cur:
+            return RedirectResponse(url="/sub-rentals?error=Not%20found", status_code=303)
+        old_total = int(cur["quantity_total"] or 0)
+        old_avail = int(cur["quantity_available"] or 0)
+        in_use = max(0, old_total - old_avail)
+        new_total = quantity_total
+        new_avail = new_total - in_use
+        if new_avail < 0:
+            return RedirectResponse(
+                url=f"/sub-rentals/{sub_id}/edit?error=Total%20units%20cannot%20be%20less%20than%20units%20already%20allocated",
+                status_code=303,
+            )
+        cursor.execute(
+            """
+            UPDATE sub_rentals
+            SET supplier_name=%s, equipment_description=%s, quantity_total=%s, quantity_available=%s, cost_per_unit=%s, notes=%s
+            WHERE id=%s AND company_id=%s
+            """,
+            (sup, desc, new_total, new_avail, cost_per_unit, notes.strip(), sub_id, user["company_id"]),
         )
-    cursor.execute(
-        """
-        UPDATE sub_rentals
-        SET supplier_name=?, equipment_description=?, quantity_total=?, quantity_available=?, cost_per_unit=?, notes=?
-        WHERE id=? AND company_id=?
-        """,
-        (sup, desc, new_total, new_avail, cost_per_unit, notes.strip(), sub_id, user["company_id"]),
-    )
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/sub-rentals", status_code=303)
-
-
+        return RedirectResponse(url="/sub-rentals", status_code=303)
+    
+    
 @app.post("/sub-rentals/{sub_id}/delete")
 async def sub_rental_delete(request: Request, sub_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -3151,81 +3065,76 @@ async def sub_rental_delete(request: Request, sub_id: int):
         return response
     if not await validate_csrf(request, user):
         return render_message(request, "Security Error", "Invalid security token.", "/sub-rentals", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT id FROM sub_rentals WHERE id=? AND company_id=?", (sub_id, user["company_id"]))
-    if not cursor.fetchone():
-        conn.close()
-        return RedirectResponse(url="/sub-rentals?error=Not%20found", status_code=303)
-    cursor.execute(
-        """
-        SELECT 1 FROM sub_rental_usage u
-        JOIN jobs j ON j.id = u.job_id AND j.company_id = u.company_id
-        WHERE u.sub_rental_id = ? AND u.company_id = ?
-        AND j.status IN ('upcoming', 'active')
-        LIMIT 1
-        """,
-        (sub_id, user["company_id"]),
-    )
-    if cursor.fetchone():
-        conn.close()
-        return RedirectResponse(
-            url="/sub-rentals?error=Cannot%20delete%20while%20units%20are%20on%20an%20open%20job",
-            status_code=303,
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT id FROM sub_rentals WHERE id=%s AND company_id=%s", (sub_id, user["company_id"]))
+        if not cursor.fetchone():
+            return RedirectResponse(url="/sub-rentals?error=Not%20found", status_code=303)
+        cursor.execute(
+            """
+            SELECT 1 FROM sub_rental_usage u
+            JOIN jobs j ON j.id = u.job_id AND j.company_id = u.company_id
+            WHERE u.sub_rental_id = %s AND u.company_id = %s
+            AND j.status IN ('upcoming', 'active')
+            LIMIT 1
+            """,
+            (sub_id, user["company_id"]),
         )
-    cursor.execute("DELETE FROM sub_rental_usage WHERE sub_rental_id=? AND company_id=?", (sub_id, user["company_id"]))
-    cursor.execute("DELETE FROM sub_rentals WHERE id=? AND company_id=?", (sub_id, user["company_id"]))
-    conn.commit()
-    conn.close()
-    return RedirectResponse(url="/sub-rentals", status_code=303)
-
-
+        if cursor.fetchone():
+            return RedirectResponse(
+                url="/sub-rentals?error=Cannot%20delete%20while%20units%20are%20on%20an%20open%20job",
+                status_code=303,
+            )
+        cursor.execute("DELETE FROM sub_rental_usage WHERE sub_rental_id=%s AND company_id=%s", (sub_id, user["company_id"]))
+        cursor.execute("DELETE FROM sub_rentals WHERE id=%s AND company_id=%s", (sub_id, user["company_id"]))
+        return RedirectResponse(url="/sub-rentals", status_code=303)
+    
+    
 @app.get("/quote", response_class=HTMLResponse)
 def quote_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, name, price, quantity, quantity_rented,
-               (COALESCE(quantity, 1) - COALESCE(quantity_rented, 0)) AS qty_available
-        FROM equipment
-        WHERE company_id=? AND (COALESCE(quantity, 1) - COALESCE(quantity_rented, 0)) > 0
-        ORDER BY name ASC
-        """,
-        (user["company_id"],),
-    )
-    items = cursor.fetchall()
-    cursor.execute(
-        """
-        SELECT id, supplier_name, equipment_description, quantity_total, quantity_available, cost_per_unit, notes
-        FROM sub_rentals
-        WHERE company_id=? AND quantity_available > 0
-        ORDER BY supplier_name ASC, id ASC
-        """,
-        (user["company_id"],),
-    )
-    sub_rentals = cursor.fetchall()
-    cursor.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC", (user["company_id"],))
-    clients = cursor.fetchall()
-    conn.close()
-    company = get_company_settings(user["company_id"])
-    return templates.TemplateResponse(
-        request=request,
-        name="quote.html",
-        context={
-            "title": "Create Quote",
-            "items": items,
-            "sub_rentals": sub_rentals,
-            "clients": clients,
-            "company": company,
-            "current_user": user,
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT id, name, price, quantity, quantity_rented,
+                   (COALESCE(quantity, 1) - COALESCE(quantity_rented, 0)) AS qty_available
+            FROM equipment
+            WHERE company_id=%s AND (COALESCE(quantity, 1) - COALESCE(quantity_rented, 0)) > 0
+            ORDER BY name ASC
+            """,
+            (user["company_id"],),
+        )
+        items = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT id, supplier_name, equipment_description, quantity_total, quantity_available, cost_per_unit, notes
+            FROM sub_rentals
+            WHERE company_id=%s AND quantity_available > 0
+            ORDER BY supplier_name ASC, id ASC
+            """,
+            (user["company_id"],),
+        )
+        sub_rentals = cursor.fetchall()
+        cursor.execute("SELECT * FROM clients WHERE company_id=%s ORDER BY name ASC", (user["company_id"],))
+        clients = cursor.fetchall()
+        company = get_company_settings(user["company_id"])
+        return templates.TemplateResponse(
+            request=request,
+            name="quote.html",
+            context={
+                "title": "Create Quote",
+                "items": items,
+                "sub_rentals": sub_rentals,
+                "clients": clients,
+                "company": company,
+                "current_user": user,
+            },
+        )
+    
+    
 @app.post("/quote", response_class=HTMLResponse)
 async def generate_quote(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -3250,188 +3159,179 @@ async def generate_quote(request: Request):
     end_date = str(form_data.get("end_date", "")).strip()
     special_notes = str(form_data.get("special_notes", "")).strip()
     quote_terms = str(form_data.get("quote_terms", "")).strip()
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, name, price, quantity, quantity_rented
-        FROM equipment
-        WHERE company_id=? AND (COALESCE(quantity, 1) - COALESCE(quantity_rented, 0)) > 0
-        ORDER BY name ASC
-        """,
-        (user["company_id"],),
-    )
-    items = cursor.fetchall()
-    cursor.execute(
-        """
-        SELECT id, supplier_name, equipment_description, quantity_total, quantity_available, cost_per_unit
-        FROM sub_rentals
-        WHERE company_id=? AND quantity_available > 0
-        ORDER BY supplier_name ASC, id ASC
-        """,
-        (user["company_id"],),
-    )
-    sub_stock = cursor.fetchall()
-    lines = []
-    quote_date = datetime.now().strftime("%Y-%m-%d")
-    quote_number = datetime.now().strftime("%Y%m%d%H%M")
-    for item in items:
-        item_id = item["id"]
-        qty_raw = str(form_data.get(f"qty_{item_id}", "0")).strip()
-        days_raw = str(form_data.get(f"days_{item_id}", "1")).strip()
-        try:
-            qty = int(qty_raw)
-            days = int(days_raw)
-        except ValueError:
-            conn.close()
-            return render_message(request, "Create Quote", "Quantity and days must be whole numbers.", "/quote", user)
-        if qty < 0 or days < 1:
-            conn.close()
-            return render_message(request, "Create Quote", "Quantity must be 0+ and days at least 1.", "/quote", user)
-        if qty == 0:
-            continue
-        avail = qty_available(item)
-        if qty > avail:
-            conn.close()
-            return render_message(request, "Create Quote", "Not enough units available", "/quote", user)
-        unit_price = int(item["price"] or 0)
-        line_total = qty * unit_price * days
-        lines.append(
-            {
-                "line_type": "owned",
-                "equipment_id": item_id,
-                "name": item["name"],
-                "qty": qty,
-                "unit_price": unit_price,
-                "days": days,
-                "line_total": line_total,
-            }
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT id, name, price, quantity, quantity_rented
+            FROM equipment
+            WHERE company_id=%s AND (COALESCE(quantity, 1) - COALESCE(quantity_rented, 0)) > 0
+            ORDER BY name ASC
+            """,
+            (user["company_id"],),
         )
-    for sr in sub_stock:
-        sid = int(sr["id"])
-        qty_raw = str(form_data.get(f"sub_qty_{sid}", "0")).strip()
-        days_raw = str(form_data.get(f"sub_days_{sid}", "1")).strip()
-        show_raw = str(form_data.get(f"sub_show_{sid}", "0")).strip()
-        try:
-            qty = int(qty_raw)
-            days = int(days_raw)
-        except ValueError:
-            conn.close()
-            return render_message(request, "Create Quote", "Sub-rental quantity and days must be whole numbers.", "/quote", user)
-        if qty < 0 or days < 1:
-            conn.close()
-            return render_message(request, "Create Quote", "Sub-rental quantity must be 0+ and days at least 1.", "/quote", user)
-        if qty == 0:
-            continue
-        avail = max(0, int(sr["quantity_available"] or 0))
-        if qty > avail:
-            conn.close()
-            return render_message(request, "Create Quote", "Not enough sub-rental units available", "/quote", user)
-        unit_price = int(sr["cost_per_unit"] or 0)
-        line_total = qty * unit_price * days
-        desc = str(sr["equipment_description"] or "").strip()
-        supplier = str(sr["supplier_name"] or "").strip()
-        show_on_quote = 1 if show_raw in ("1", "yes", "Yes", "true", "True") else 0
-        lines.append(
-            {
-                "line_type": "sub_rental",
-                "sub_rental_id": sid,
-                "supplier_name": supplier,
-                "name": desc,
-                "qty": qty,
-                "unit_price": unit_price,
-                "days": days,
-                "line_total": line_total,
-                "show_on_quote": show_on_quote,
-            }
+        items = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT id, supplier_name, equipment_description, quantity_total, quantity_available, cost_per_unit
+            FROM sub_rentals
+            WHERE company_id=%s AND quantity_available > 0
+            ORDER BY supplier_name ASC, id ASC
+            """,
+            (user["company_id"],),
         )
-    if not lines:
-        conn.close()
-        return render_message(request, "Create Quote", "Please add quantity for at least one owned or sub-rental item.", "/quote", user)
-    subtotal = sum(int(l.get("line_total", 0) or 0) for l in lines)
-    com = get_company_settings(user["company_id"])
-    try:
-        discount_percent_in = float(str(form_data.get("discount_percent", com.get("default_discount_percent", 0))).strip())
-    except ValueError:
-        discount_percent_in = 0.0
-    discount_percent_in = max(0.0, min(100.0, discount_percent_in))
-    vat_on_raw = form_data.get("vat_on")
-    if vat_on_raw is None:
-        vat_enabled = bool(int(com.get("vat_enabled") or 0))
-    else:
-        vat_enabled = str(vat_on_raw).strip() in ("1", "on", "yes", "true", "True")
-    try:
-        vat_pct_use = float(com.get("vat_percent") or 15)
-    except (TypeError, ValueError):
-        vat_pct_use = 15.0
-    vat_pct_use = max(0.0, min(100.0, vat_pct_use))
-    totals = compute_financial_totals(subtotal, discount_percent_in, vat_enabled, vat_pct_use)
-    grand_total = int(totals["grand_total"])
-    line_items_json = json.dumps(lines)
-    created_at = datetime.utcnow().isoformat()
-    for _attempt in range(5):
-        try:
-            cursor.execute(
-                """
-                INSERT INTO quotes (
-                    company_id, quote_number, client_name, quote_date, total, line_items_json, status, created_at,
-                    subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total,
-                    job_name, site_location, start_date, end_date, special_notes, quote_terms
-                )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user["company_id"],
-                    quote_number,
-                    clean_client_name,
-                    quote_date,
-                    grand_total,
-                    line_items_json,
-                    created_at,
-                    int(totals["subtotal"]),
-                    totals["discount_percent"],
-                    int(totals["discount_amount"]),
-                    1 if totals["vat_enabled"] else 0,
-                    totals["vat_percent"],
-                    int(totals["vat_amount"]),
-                    grand_total,
-                    job_name,
-                    site_location or None,
-                    start_date or None,
-                    end_date or None,
-                    special_notes or None,
-                    quote_terms or None,
-                ),
+        sub_stock = cursor.fetchall()
+        lines = []
+        quote_date = datetime.now().strftime("%Y-%m-%d")
+        quote_number = datetime.now().strftime("%Y%m%d%H%M")
+        for item in items:
+            item_id = item["id"]
+            qty_raw = str(form_data.get(f"qty_{item_id}", "0")).strip()
+            days_raw = str(form_data.get(f"days_{item_id}", "1")).strip()
+            try:
+                qty = int(qty_raw)
+                days = int(days_raw)
+            except ValueError:
+                return render_message(request, "Create Quote", "Quantity and days must be whole numbers.", "/quote", user)
+            if qty < 0 or days < 1:
+                return render_message(request, "Create Quote", "Quantity must be 0+ and days at least 1.", "/quote", user)
+            if qty == 0:
+                continue
+            avail = qty_available(item)
+            if qty > avail:
+                return render_message(request, "Create Quote", "Not enough units available", "/quote", user)
+            unit_price = int(item["price"] or 0)
+            line_total = qty * unit_price * days
+            lines.append(
+                {
+                    "line_type": "owned",
+                    "equipment_id": item_id,
+                    "name": item["name"],
+                    "qty": qty,
+                    "unit_price": unit_price,
+                    "days": days,
+                    "line_total": line_total,
+                }
             )
-            break
-        except sqlite3.IntegrityError:
-            conn.rollback()
-            quote_number = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(3)
-    else:
-        conn.close()
-        return render_message(request, "Create Quote", "Could not save quote. Please try again.", "/quote", user)
-    quote_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    download_url = f"/download?{urlencode({'quote_id': str(quote_id)})}"
-    return templates.TemplateResponse(
-        request=request,
-        name="quote_result.html",
-        context={
-            "title": "Quote",
-            "client_name": clean_client_name,
-            "quote_date": quote_date,
-            "quote_number": quote_number,
-            "lines": lines,
-            "totals": totals,
-            "total": grand_total,
-            "download_url": download_url,
-            "quote_id": quote_id,
-            "current_user": user,
-        },
-    )
-
-
+        for sr in sub_stock:
+            sid = int(sr["id"])
+            qty_raw = str(form_data.get(f"sub_qty_{sid}", "0")).strip()
+            days_raw = str(form_data.get(f"sub_days_{sid}", "1")).strip()
+            show_raw = str(form_data.get(f"sub_show_{sid}", "0")).strip()
+            try:
+                qty = int(qty_raw)
+                days = int(days_raw)
+            except ValueError:
+                return render_message(request, "Create Quote", "Sub-rental quantity and days must be whole numbers.", "/quote", user)
+            if qty < 0 or days < 1:
+                return render_message(request, "Create Quote", "Sub-rental quantity must be 0+ and days at least 1.", "/quote", user)
+            if qty == 0:
+                continue
+            avail = max(0, int(sr["quantity_available"] or 0))
+            if qty > avail:
+                return render_message(request, "Create Quote", "Not enough sub-rental units available", "/quote", user)
+            unit_price = int(sr["cost_per_unit"] or 0)
+            line_total = qty * unit_price * days
+            desc = str(sr["equipment_description"] or "").strip()
+            supplier = str(sr["supplier_name"] or "").strip()
+            show_on_quote = 1 if show_raw in ("1", "yes", "Yes", "true", "True") else 0
+            lines.append(
+                {
+                    "line_type": "sub_rental",
+                    "sub_rental_id": sid,
+                    "supplier_name": supplier,
+                    "name": desc,
+                    "qty": qty,
+                    "unit_price": unit_price,
+                    "days": days,
+                    "line_total": line_total,
+                    "show_on_quote": show_on_quote,
+                }
+            )
+        if not lines:
+            return render_message(request, "Create Quote", "Please add quantity for at least one owned or sub-rental item.", "/quote", user)
+        subtotal = sum(int(l.get("line_total", 0) or 0) for l in lines)
+        com = get_company_settings(user["company_id"])
+        try:
+            discount_percent_in = float(str(form_data.get("discount_percent", com.get("default_discount_percent", 0))).strip())
+        except ValueError:
+            discount_percent_in = 0.0
+        discount_percent_in = max(0.0, min(100.0, discount_percent_in))
+        vat_on_raw = form_data.get("vat_on")
+        if vat_on_raw is None:
+            vat_enabled = bool(int(com.get("vat_enabled") or 0))
+        else:
+            vat_enabled = str(vat_on_raw).strip() in ("1", "on", "yes", "true", "True")
+        try:
+            vat_pct_use = float(com.get("vat_percent") or 15)
+        except (TypeError, ValueError):
+            vat_pct_use = 15.0
+        vat_pct_use = max(0.0, min(100.0, vat_pct_use))
+        totals = compute_financial_totals(subtotal, discount_percent_in, vat_enabled, vat_pct_use)
+        grand_total = int(totals["grand_total"])
+        line_items_json = json.dumps(lines)
+        created_at = datetime.utcnow().isoformat()
+        for _attempt in range(5):
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO quotes (
+                        company_id, quote_number, client_name, quote_date, total, line_items_json, status, created_at,
+                        subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total,
+                        job_name, site_location, start_date, end_date, special_notes, quote_terms
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        user["company_id"],
+                        quote_number,
+                        clean_client_name,
+                        quote_date,
+                        grand_total,
+                        line_items_json,
+                        created_at,
+                        int(totals["subtotal"]),
+                        totals["discount_percent"],
+                        int(totals["discount_amount"]),
+                        1 if totals["vat_enabled"] else 0,
+                        totals["vat_percent"],
+                        int(totals["vat_amount"]),
+                        grand_total,
+                        job_name,
+                        site_location or None,
+                        start_date or None,
+                        end_date or None,
+                        special_notes or None,
+                        quote_terms or None,
+                    ),
+                )
+                break
+            except psycopg2.IntegrityError:
+                conn.rollback()
+                quote_number = datetime.now().strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(3)
+        else:
+            return render_message(request, "Create Quote", "Could not save quote. Please try again.", "/quote", user)
+        quote_id = cursor.fetchone()["id"]
+        download_url = f"/download?{urlencode({'quote_id': str(quote_id)})}"
+        return templates.TemplateResponse(
+            request=request,
+            name="quote_result.html",
+            context={
+                "title": "Quote",
+                "client_name": clean_client_name,
+                "quote_date": quote_date,
+                "quote_number": quote_number,
+                "lines": lines,
+                "totals": totals,
+                "total": grand_total,
+                "download_url": download_url,
+                "quote_id": quote_id,
+                "current_user": user,
+            },
+        )
+    
+    
 def show_sub_rental_on_client_pdf(line: dict) -> bool:
     v = line.get("show_on_quote", 0)
     return v in (1, True, "1", "yes", "Yes", "true", "True")
@@ -3701,26 +3601,25 @@ def download(
     lines: list[dict] = []
     fin: dict[str, int | float | bool] = {}
     if quote_id is not None:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM quotes WHERE id=? AND company_id=?", (quote_id, user["company_id"]))
-        qrow = cursor.fetchone()
-        conn.close()
-        if not qrow:
-            return render_message(request, "Quote Error", "Quote not found.", "/quote", user)
-        qdict = dict(qrow)
-        try:
-            lines = json.loads(qdict["line_items_json"])
-        except json.JSONDecodeError:
-            lines = []
-        if not isinstance(lines, list):
-            lines = []
-        client = qdict["client_name"]
-        date = qdict["quote_date"]
-        qnum = qdict["quote_number"]
-        fin = quote_financials_from_saved_row(qdict, lines)
-        meta = quote_meta_from_row(qdict, user["company_id"], client)
-        return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quote", quote_meta=meta)
+        with get_db() as conn:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT * FROM quotes WHERE id=%s AND company_id=%s", (quote_id, user["company_id"]))
+            qrow = cursor.fetchone()
+            if not qrow:
+                return render_message(request, "Quote Error", "Quote not found.", "/quote", user)
+            qdict = dict(qrow)
+            try:
+                lines = json.loads(qdict["line_items_json"])
+            except json.JSONDecodeError:
+                lines = []
+            if not isinstance(lines, list):
+                lines = []
+            client = qdict["client_name"]
+            date = qdict["quote_date"]
+            qnum = qdict["quote_number"]
+            fin = quote_financials_from_saved_row(qdict, lines)
+            meta = quote_meta_from_row(qdict, user["company_id"], client)
+            return quote_pdf_file_response(request, user, settings, client, date, qnum, lines, fin, "/quote", quote_meta=meta)
     elif data:
         client = client or ""
         date = date or ""
@@ -3755,33 +3654,32 @@ def rent_page(request: Request, item_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM clients WHERE company_id=? ORDER BY name ASC", (user["company_id"],))
-    clients = cursor.fetchall()
-    cursor.execute("SELECT * FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-    equipment = cursor.fetchone()
-    conn.close()
-    if not equipment:
-        return render_message(request, "Error", "Equipment not found.", "/", user)
-    if not clients:
-        return render_message(request, "Rent Equipment", "Add at least one client before renting.", "/clients", user)
-    qty_avail = qty_available(equipment)
-    if qty_avail < 1:
-        return render_message(request, "Rent Equipment", "Not enough units available", "/", user)
-    return templates.TemplateResponse(
-        request=request,
-        name="rent.html",
-        context={
-            "title": "Rent Equipment",
-            "clients": clients,
-            "equipment": equipment,
-            "qty_available": qty_avail,
-            "current_user": user,
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM clients WHERE company_id=%s ORDER BY name ASC", (user["company_id"],))
+        clients = cursor.fetchall()
+        cursor.execute("SELECT * FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+        equipment = cursor.fetchone()
+        if not equipment:
+            return render_message(request, "Error", "Equipment not found.", "/", user)
+        if not clients:
+            return render_message(request, "Rent Equipment", "Add at least one client before renting.", "/clients", user)
+        qty_avail = qty_available(equipment)
+        if qty_avail < 1:
+            return render_message(request, "Rent Equipment", "Not enough units available", "/", user)
+        return templates.TemplateResponse(
+            request=request,
+            name="rent.html",
+            context={
+                "title": "Rent Equipment",
+                "clients": clients,
+                "equipment": equipment,
+                "qty_available": qty_avail,
+                "current_user": user,
+            },
+        )
+    
+    
 @app.post("/rent/{item_id}")
 async def rent_item(request: Request, item_id: int, client: str = Form(...), due_date: str = Form(...), units: int = Form(default=1)):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -3798,74 +3696,67 @@ async def rent_item(request: Request, item_id: int, client: str = Form(...), due
         return render_message(request, "Rent Equipment", "Due date must be YYYY-MM-DD.", "/", user)
     if units < 1:
         return render_message(request, "Rent Equipment", "Units must be at least 1.", f"/rent/{item_id}", user)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT * FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-        equipment = cursor.fetchone()
-        if not equipment:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute("SELECT * FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+            equipment = cursor.fetchone()
+            if not equipment:
+                conn.rollback()
+                return render_message(request, "Error", "Equipment not found.", "/", user)
+            if units > qty_available(equipment):
+                conn.rollback()
+                return render_message(request, "Rent Equipment", "Not enough units available", f"/rent/{item_id}", user)
+            cursor.execute(
+                """
+                UPDATE equipment
+                SET quantity_rented = COALESCE(quantity_rented, 0) + %s,
+                    rented_to = %s,
+                    due_date = %s,
+                    prep_status = 'pending'
+                WHERE id=%s AND company_id=%s
+                """,
+                (units, clean_client, due_date, item_id, user["company_id"]),
+            )
+            sync_equipment_row(cursor, item_id, user["company_id"])
+            cursor.execute(
+                """
+                INSERT INTO rental_history (equipment_name, client, date_rented, due_date, company_id, units)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (equipment["name"], clean_client, datetime.now().strftime("%Y-%m-%d"), due_date, user["company_id"], units),
+            )
+        except Exception:
             conn.rollback()
-            conn.close()
-            return render_message(request, "Error", "Equipment not found.", "/", user)
-        if units > qty_available(equipment):
-            conn.rollback()
-            conn.close()
-            return render_message(request, "Rent Equipment", "Not enough units available", f"/rent/{item_id}", user)
-        cursor.execute(
-            """
-            UPDATE equipment
-            SET quantity_rented = COALESCE(quantity_rented, 0) + ?,
-                rented_to = ?,
-                due_date = ?,
-                prep_status = 'pending'
-            WHERE id=? AND company_id=?
-            """,
-            (units, clean_client, due_date, item_id, user["company_id"]),
-        )
-        sync_equipment_row(cursor, item_id, user["company_id"])
-        cursor.execute(
-            """
-            INSERT INTO rental_history (equipment_name, client, date_rented, due_date, company_id, units)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (equipment["name"], clean_client, datetime.now().strftime("%Y-%m-%d"), due_date, user["company_id"], units),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    return RedirectResponse(url="/", status_code=303)
-
-
+            raise
+        return RedirectResponse(url="/", status_code=303)
+    
+    
 @app.get("/return/{item_id}", response_class=HTMLResponse)
 def return_item_page(request: Request, item_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-    equipment = cursor.fetchone()
-    conn.close()
-    if not equipment:
-        return render_message(request, "Error", "Equipment not found.", "/", user)
-    if qty_rented(equipment) < 1:
-        return render_message(request, "Return", "Nothing to return for this item.", "/", user)
-    return templates.TemplateResponse(
-        request=request,
-        name="return.html",
-        context={
-            "title": "Return Equipment",
-            "equipment": equipment,
-            "max_units": qty_rented(equipment),
-            "current_user": user,
-        },
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+        equipment = cursor.fetchone()
+        if not equipment:
+            return render_message(request, "Error", "Equipment not found.", "/", user)
+        if qty_rented(equipment) < 1:
+            return render_message(request, "Return", "Nothing to return for this item.", "/", user)
+        return templates.TemplateResponse(
+            request=request,
+            name="return.html",
+            context={
+                "title": "Return Equipment",
+                "equipment": equipment,
+                "max_units": qty_rented(equipment),
+                "current_user": user,
+            },
+        )
+    
+    
 @app.post("/return/{item_id}")
 async def return_item_submit(request: Request, item_id: int, units: int = Form(...)):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -3875,147 +3766,138 @@ async def return_item_submit(request: Request, item_id: int, units: int = Form(.
         return render_message(request, "Security Error", "Invalid security token.", f"/return/{item_id}", user)
     if units < 1:
         return RedirectResponse(url=f"/return/{item_id}?error=Units%20must%20be%20at%20least%201", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute("SELECT name, rented_to, quantity_rented FROM equipment WHERE id=? AND company_id=?", (item_id, user["company_id"]))
-        equipment = cursor.fetchone()
-        if not equipment:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute("SELECT name, rented_to, quantity_rented FROM equipment WHERE id=%s AND company_id=%s", (item_id, user["company_id"]))
+            equipment = cursor.fetchone()
+            if not equipment:
+                conn.rollback()
+                return render_message(request, "Error", "Equipment not found.", "/", user)
+            qr = qty_rented(equipment)
+            if units > qr:
+                conn.rollback()
+                return RedirectResponse(url=f"/return/{item_id}?error=Not%20enough%20units%20available", status_code=303)
+            apply_rental_return_units(cursor, user["company_id"], equipment["name"], units)
+            cursor.execute(
+                "UPDATE equipment SET quantity_rented = GREATEST(0, COALESCE(quantity_rented,0) - %s) WHERE id=%s AND company_id=%s",
+                (units, item_id, user["company_id"]),
+            )
+            sync_equipment_row(cursor, item_id, user["company_id"])
+        except Exception:
             conn.rollback()
-            conn.close()
-            return render_message(request, "Error", "Equipment not found.", "/", user)
-        qr = qty_rented(equipment)
-        if units > qr:
-            conn.rollback()
-            conn.close()
-            return RedirectResponse(url=f"/return/{item_id}?error=Not%20enough%20units%20available", status_code=303)
-        apply_rental_return_units(cursor, user["company_id"], equipment["name"], units)
-        cursor.execute(
-            "UPDATE equipment SET quantity_rented = MAX(0, COALESCE(quantity_rented,0) - ?) WHERE id=? AND company_id=?",
-            (units, item_id, user["company_id"]),
-        )
-        sync_equipment_row(cursor, item_id, user["company_id"])
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    return RedirectResponse(url="/", status_code=303)
-
-
+            raise
+        return RedirectResponse(url="/", status_code=303)
+    
+    
 @app.get("/invoices", response_class=HTMLResponse)
 def invoices_list(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, invoice_number, client_name, created_at, due_date, total,
-               COALESCE(amount_paid, 0) AS amount_paid, payment_status
-        FROM invoices
-        WHERE company_id=?
-        ORDER BY id DESC
-        """,
-        (user["company_id"],),
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    today = datetime.now().strftime("%Y-%m-%d")
-    invoices_out = []
-    for r in rows:
-        d = dict(r)
-        tot = int(d.get("total") or 0)
-        ap = int(d.get("amount_paid") or 0)
-        d["remaining"] = max(0, tot - ap)
-        ps = str(d.get("payment_status") or "unpaid").lower()
-        d["payment_status_norm"] = ps
-        dd = d.get("due_date") or ""
-        d["overdue"] = ps in ("unpaid", "partial") and bool(dd) and dd < today
-        invoices_out.append(d)
-    return templates.TemplateResponse(
-        request=request,
-        name="invoices_list.html",
-        context={"title": "Invoices", "invoices": invoices_out, "current_user": user},
-    )
-
-
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT id, invoice_number, client_name, created_at, due_date, total,
+                   COALESCE(amount_paid, 0) AS amount_paid, payment_status
+            FROM invoices
+            WHERE company_id=%s
+            ORDER BY id DESC
+            """,
+            (user["company_id"],),
+        )
+        rows = cursor.fetchall()
+        today = datetime.now().strftime("%Y-%m-%d")
+        invoices_out = []
+        for r in rows:
+            d = dict(r)
+            tot = int(d.get("total") or 0)
+            ap = int(d.get("amount_paid") or 0)
+            d["remaining"] = max(0, tot - ap)
+            ps = str(d.get("payment_status") or "unpaid").lower()
+            d["payment_status_norm"] = ps
+            dd = d.get("due_date") or ""
+            d["overdue"] = ps in ("unpaid", "partial") and bool(dd) and dd < today
+            invoices_out.append(d)
+        return templates.TemplateResponse(
+            request=request,
+            name="invoices_list.html",
+            context={"title": "Invoices", "invoices": invoices_out, "current_user": user},
+        )
+    
+    
 @app.get("/invoices/{invoice_id}", response_class=HTMLResponse)
 def invoice_detail_page(request: Request, invoice_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM invoices WHERE id=? AND company_id=?", (invoice_id, user["company_id"]))
-    inv_row = cursor.fetchone()
-    if not inv_row:
-        conn.close()
-        return render_message(request, "Not found", "Invoice not found.", "/invoices", user)
-    inv = dict(inv_row)
-    quote_terms = ""
-    if inv.get("quote_id"):
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM invoices WHERE id=%s AND company_id=%s", (invoice_id, user["company_id"]))
+        inv_row = cursor.fetchone()
+        if not inv_row:
+            return render_message(request, "Not found", "Invoice not found.", "/invoices", user)
+        inv = dict(inv_row)
+        quote_terms = ""
+        if inv.get("quote_id"):
+            cursor.execute(
+                "SELECT quote_terms FROM quotes WHERE id=%s AND company_id=%s",
+                (inv["quote_id"], user["company_id"]),
+            )
+            qt_row = cursor.fetchone()
+            if qt_row:
+                quote_terms = str(qt_row["quote_terms"] or "").strip()
         cursor.execute(
-            "SELECT quote_terms FROM quotes WHERE id=? AND company_id=?",
-            (inv["quote_id"], user["company_id"]),
+            """
+            SELECT ip.amount, ip.recorded_at, u.full_name AS recorded_by_name
+            FROM invoice_payments ip
+            JOIN users u ON u.id = ip.recorded_by_user_id AND u.company_id = ip.company_id
+            WHERE ip.invoice_id=%s AND ip.company_id=%s
+            ORDER BY ip.recorded_at ASC, ip.id ASC
+            """,
+            (invoice_id, user["company_id"]),
         )
-        qt_row = cursor.fetchone()
-        if qt_row:
-            quote_terms = str(qt_row["quote_terms"] or "").strip()
-    cursor.execute(
-        """
-        SELECT ip.amount, ip.recorded_at, u.full_name AS recorded_by_name
-        FROM invoice_payments ip
-        JOIN users u ON u.id = ip.recorded_by_user_id AND u.company_id = ip.company_id
-        WHERE ip.invoice_id=? AND ip.company_id=?
-        ORDER BY ip.recorded_at ASC, ip.id ASC
-        """,
-        (invoice_id, user["company_id"]),
-    )
-    payments = [dict(p) for p in cursor.fetchall()]
-    conn.close()
-    settings = get_company_settings(user["company_id"])
-    lines = parse_invoice_line_items_json(inv.get("line_items_json"))
-    fin = invoice_financials_from_row(inv, lines)
-    total = int(fin["grand_total"])
-    amount_paid = int(inv.get("amount_paid") or 0)
-    remaining = max(0, total - amount_paid)
-    today = datetime.now().strftime("%Y-%m-%d")
-    dd = inv.get("due_date") or ""
-    ps = str(inv.get("payment_status") or "unpaid").lower()
-    overdue = ps in ("unpaid", "partial") and bool(dd) and dd < today
-    logo_uri = company_logo_file_uri(settings)
-    logo_href = company_logo_web_path(settings)
-    err = request.query_params.get("error", "")
-    client_contact = client_contact_from_directory(user["company_id"], inv.get("client_name"))
-    return templates.TemplateResponse(
-        request=request,
-        name="invoice_detail.html",
-        context={
-            "title": f"Invoice {inv.get('invoice_number', '')}",
-            "invoice": inv,
-            "settings": settings,
-            "line_items": lines,
-            "payments": payments,
-            "fin": fin,
-            "subtotal": int(fin["subtotal"]),
-            "total": total,
-            "amount_paid": amount_paid,
-            "remaining": remaining,
-            "overdue": overdue,
-            "logo_uri": logo_uri,
-            "logo_href": logo_href,
-            "client_contact": client_contact,
-            "quote_terms": quote_terms,
-            "current_user": user,
-            "error": err,
-        },
-    )
-
-
+        payments = [dict(p) for p in cursor.fetchall()]
+        settings = get_company_settings(user["company_id"])
+        lines = parse_invoice_line_items_json(inv.get("line_items_json"))
+        fin = invoice_financials_from_row(inv, lines)
+        total = int(fin["grand_total"])
+        amount_paid = int(inv.get("amount_paid") or 0)
+        remaining = max(0, total - amount_paid)
+        today = datetime.now().strftime("%Y-%m-%d")
+        dd = inv.get("due_date") or ""
+        ps = str(inv.get("payment_status") or "unpaid").lower()
+        overdue = ps in ("unpaid", "partial") and bool(dd) and dd < today
+        logo_uri = company_logo_file_uri(settings)
+        logo_href = company_logo_web_path(settings)
+        err = request.query_params.get("error", "")
+        client_contact = client_contact_from_directory(user["company_id"], inv.get("client_name"))
+        return templates.TemplateResponse(
+            request=request,
+            name="invoice_detail.html",
+            context={
+                "title": f"Invoice {inv.get('invoice_number', '')}",
+                "invoice": inv,
+                "settings": settings,
+                "line_items": lines,
+                "payments": payments,
+                "fin": fin,
+                "subtotal": int(fin["subtotal"]),
+                "total": total,
+                "amount_paid": amount_paid,
+                "remaining": remaining,
+                "overdue": overdue,
+                "logo_uri": logo_uri,
+                "logo_href": logo_href,
+                "client_contact": client_contact,
+                "quote_terms": quote_terms,
+                "current_user": user,
+                "error": err,
+            },
+        )
+    
+    
 @app.post("/invoices/{invoice_id}/payment")
 async def invoice_record_payment(request: Request, invoice_id: int, payment_amount: str = Form(...)):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
@@ -4030,76 +3912,69 @@ async def invoice_record_payment(request: Request, invoice_id: int, payment_amou
         return RedirectResponse(url=f"/invoices/{invoice_id}?error=Invalid%20amount", status_code=303)
     if amt < 1:
         return RedirectResponse(url=f"/invoices/{invoice_id}?error=Amount%20must%20be%20at%20least%201", status_code=303)
-    conn = get_db()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute(
-            "SELECT id FROM invoices WHERE id=? AND company_id=?",
-            (invoice_id, user["company_id"]),
-        )
-        if not cursor.fetchone():
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute(
+                "SELECT id FROM invoices WHERE id=%s AND company_id=%s",
+                (invoice_id, user["company_id"]),
+            )
+            if not cursor.fetchone():
+                conn.rollback()
+                return RedirectResponse(url="/invoices?error=Invoice%20not%20found", status_code=303)
+            cursor.execute(
+                """
+                INSERT INTO invoice_payments (company_id, invoice_id, amount, recorded_by_user_id, recorded_at)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (user["company_id"], invoice_id, amt, user["user_id"], datetime.utcnow().isoformat()),
+            )
+            refresh_invoice_payment_aggregate(cursor, invoice_id, user["company_id"])
+        except Exception:
             conn.rollback()
-            conn.close()
-            return RedirectResponse(url="/invoices?error=Invoice%20not%20found", status_code=303)
-        cursor.execute(
-            """
-            INSERT INTO invoice_payments (company_id, invoice_id, amount, recorded_by_user_id, recorded_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (user["company_id"], invoice_id, amt, user["user_id"], datetime.utcnow().isoformat()),
-        )
-        refresh_invoice_payment_aggregate(cursor, invoice_id, user["company_id"])
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        conn.close()
-        raise
-    conn.close()
-    return RedirectResponse(url=f"/invoices/{invoice_id}", status_code=303)
-
-
+            raise
+        return RedirectResponse(url=f"/invoices/{invoice_id}", status_code=303)
+    
+    
 @app.get("/invoices/{invoice_id}/pdf")
 def invoice_pdf_download(request: Request, invoice_id: int):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    conn = get_db()
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM invoices WHERE id=? AND company_id=?", (invoice_id, user["company_id"]))
-    inv_row = cursor.fetchone()
-    if not inv_row:
-        conn.close()
-        return render_message(request, "Not found", "Invoice not found.", "/invoices", user)
-    inv = dict(inv_row)
-    conn.close()
-    settings = get_company_settings(user["company_id"])
-    line_items = parse_invoice_line_items_json(inv.get("line_items_json"))
-    amount_paid = int(inv.get("amount_paid") or 0)
-    total = int(inv.get("total") or 0)
-    remaining = max(0, total - amount_paid)
-    payment_status = str(inv.get("payment_status") or "unpaid").lower()
-    try:
-        pdf_bytes = build_invoice_pdf_bytes(
-            settings,
-            inv,
-            line_items,
-            amount_paid,
-            total,
-            remaining,
-            payment_status,
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT * FROM invoices WHERE id=%s AND company_id=%s", (invoice_id, user["company_id"]))
+        inv_row = cursor.fetchone()
+        if not inv_row:
+            return render_message(request, "Not found", "Invoice not found.", "/invoices", user)
+        inv = dict(inv_row)
+        settings = get_company_settings(user["company_id"])
+        line_items = parse_invoice_line_items_json(inv.get("line_items_json"))
+        amount_paid = int(inv.get("amount_paid") or 0)
+        total = int(inv.get("total") or 0)
+        remaining = max(0, total - amount_paid)
+        payment_status = str(inv.get("payment_status") or "unpaid").lower()
+        try:
+            pdf_bytes = build_invoice_pdf_bytes(
+                settings,
+                inv,
+                line_items,
+                amount_paid,
+                total,
+                remaining,
+                payment_status,
+            )
+        except Exception:
+            logger.exception("ReportLab invoice PDF failed invoice_id=%s company_id=%s", invoice_id, user["company_id"])
+            return render_message(request, "PDF Error", "Could not generate invoice PDF. Please try again.", f"/invoices/{invoice_id}", user)
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(inv.get("invoice_number") or ""))
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="invoice-{safe_name}.pdf"'},
         )
-    except Exception:
-        logger.exception("ReportLab invoice PDF failed invoice_id=%s company_id=%s", invoice_id, user["company_id"])
-        return render_message(request, "PDF Error", "Could not generate invoice PDF. Please try again.", f"/invoices/{invoice_id}", user)
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(inv.get("invoice_number") or ""))
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="invoice-{safe_name}.pdf"'},
-    )
-
-
+    
+    
 if __name__ == "__main__":
     import uvicorn
 

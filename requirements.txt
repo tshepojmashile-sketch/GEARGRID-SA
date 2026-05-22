@@ -6,3 +6,4 @@ reportlab>=4.5.0
 bcrypt>=5.0.0
 Pillow>=12.0.0
 requests>=2.32.0
+psycopg2-binary>=2.9.9
