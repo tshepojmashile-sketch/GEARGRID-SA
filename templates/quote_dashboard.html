@@ -123,9 +123,9 @@
         {% endif %}
       </td>
       <td data-label="Update">
-        <form method="post" action="/quotes/dashboard/job/{{ j['id'] }}/status" class="inline-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <form method="post" action="/quotes/dashboard/job/{{ j['id'] }}/status" class="inline-form js-job-status-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center" data-current-status="{{ j['status'] }}">
           <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
-          <select name="job_status" aria-label="Job status for job {{ j['id'] }}">
+          <select name="job_status" class="js-job-status-select" aria-label="Job status for job {{ j['id'] }}">
             {% for s in ["upcoming", "active", "done"] %}
             <option value="{{ s }}" {% if j["status"] == s %}selected{% endif %}>{{ s }}</option>
             {% endfor %}
@@ -140,4 +140,22 @@
     {% endfor %}
   </tbody>
 </table>
+<script>
+(function () {
+  document.querySelectorAll(".js-job-status-form").forEach(function (form) {
+    form.addEventListener("submit", function (e) {
+      var sel = form.querySelector(".js-job-status-select");
+      var hidden = form.querySelector("input[name='job_status']");
+      var newStatus = sel ? sel.value : (hidden ? hidden.value : "");
+      if (!newStatus) return;
+      var current = form.getAttribute("data-current-status") || "";
+      if (newStatus === "done" && current !== "done") {
+        if (!confirm("Mark job as Done? This will return all equipment to available stock.")) {
+          e.preventDefault();
+        }
+      }
+    });
+  });
+})();
+</script>
 {% endblock %}

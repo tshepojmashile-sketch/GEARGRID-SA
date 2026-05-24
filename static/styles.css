@@ -1,5 +1,5 @@
 /* --------------------------------------------------------------------------
-   SaaS layout — palette: navy #1a1a2e, bg #f4f6f9, primary #0066cc
+   GearGrid — navbar #0f1923, accent #f97316, secondary #0066cc, bg #f4f6f9
    -------------------------------------------------------------------------- */
 
 *,
@@ -82,7 +82,7 @@ body {
 
 /* ----- Main nav (dark, full-bleed) ----- */
 .main-nav {
-  background: #1a1a2e;
+  background: #0f1923;
   width: 100%;
 }
 
@@ -191,7 +191,7 @@ body {
 }
 
 .nav-link.active {
-  background: #0066cc;
+  background: #f97316;
   color: #fff;
 }
 
@@ -250,14 +250,14 @@ body {
 }
 
 .dashboard-tabs__btn--active {
-  background: #0066cc;
-  border-color: #0066cc;
+  background: #f97316;
+  border-color: #f97316;
   color: #fff;
 }
 
 .dashboard-tabs__btn--active:hover {
-  background: #0052a3;
-  border-color: #0052a3;
+  background: #ea580c;
+  border-color: #ea580c;
   color: #fff;
 }
 
@@ -443,13 +443,13 @@ body {
 
 .btn-primary,
 .btn.blue {
-  background: #0066cc;
+  background: #f97316;
   color: #fff;
 }
 
 .btn-primary:hover,
 .btn.blue:hover {
-  background: #0052a3;
+  background: #ea580c;
   color: #fff;
 }
 
@@ -464,12 +464,12 @@ body {
 }
 
 .btn.purple {
-  background: #5b21b6;
+  background: #f97316;
   color: #fff;
 }
 
 .btn.purple:hover {
-  background: #4c1d95;
+  background: #ea580c;
   color: #fff;
 }
 
@@ -653,6 +653,11 @@ th {
   background: #fafbfc;
   text-decoration: none;
   color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
   transition: box-shadow 0.15s, border-color 0.15s;
 }
 
@@ -661,8 +666,9 @@ th {
 }
 
 .stock-summary__item--active {
-  box-shadow: 0 0 0 2px #0066cc;
-  border-color: #93c5fd;
+  box-shadow: 0 0 0 2px #f97316;
+  border-color: #fdba74;
+  background: #fff7ed;
 }
 
 .stock-summary__label {
@@ -1293,4 +1299,554 @@ th {
   font-size: 0.8125rem;
   color: #64748b;
   margin-top: 2px;
+}
+
+/* ----- GearGrid branding & UI enhancements ----- */
+.geargrid-logo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-decoration: none;
+  color: #fff;
+  font-weight: 700;
+  font-size: 1rem;
+  margin: 8px 12px 8px 4px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.geargrid-logo__icon {
+  color: #f97316;
+  font-size: 1.125rem;
+  line-height: 1;
+}
+
+.geargrid-logo__gear {
+  color: #fff;
+}
+
+.geargrid-logo__grid {
+  color: #f97316;
+}
+
+.geargrid-logo__sa {
+  color: #fff;
+}
+
+.main-nav-inner {
+  align-items: center;
+}
+
+.site-footer {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px 14px 24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.8125rem;
+  color: #64748b;
+}
+
+.site-footer__support {
+  color: #0066cc;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.site-footer__support:hover {
+  text-decoration: underline;
+}
+
+.site-footer__powered {
+  color: #94a3b8;
+  font-size: 0.75rem;
+}
+
+.alert-success {
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  color: #166534;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-weight: 500;
+}
+
+.form-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.equipment-form label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #475569;
+  margin: 12px 0 6px;
+}
+
+.equipment-form input,
+.equipment-form select {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+}
+
+.dashboard-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 18px;
+  align-items: flex-end;
+}
+
+.dashboard-filters__search-wrap {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.dashboard-filters__search {
+  width: 100%;
+  max-width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  min-height: 44px;
+}
+
+.dashboard-filters__category-wrap {
+  flex: 0 1 auto;
+}
+
+.dashboard-filters__label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.dashboard-filters__category {
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  min-height: 44px;
+  min-width: 160px;
+}
+
+.badge-category {
+  background: #ffedd5;
+  color: #c2410c;
+  border: 1px solid #fdba74;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.6875rem;
+  margin-top: 4px;
+}
+
+.equipment-card__title-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.equipment-card__meta-label--nowrap {
+  white-space: nowrap;
+}
+
+.onboarding-checklist {
+  background: #fff7ed;
+  border: 1px solid #fdba74;
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+
+.onboarding-checklist__title {
+  margin: 0 0 10px;
+  font-size: 1rem;
+  color: #9a3412;
+}
+
+.onboarding-checklist__list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+
+.onboarding-checklist__list li {
+  margin: 8px 0;
+  font-size: 0.9375rem;
+}
+
+.onboarding-checklist__list a {
+  color: #c2410c;
+  font-weight: 500;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 25, 35, 0.55);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+  overflow-y: auto;
+}
+
+.modal-overlay[hidden] {
+  display: none !important;
+}
+
+body.modal-open {
+  overflow: hidden;
+}
+
+.modal-card {
+  background: #fff;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 640px;
+  padding: 22px 20px;
+  box-shadow: 0 20px 50px rgba(15, 25, 35, 0.2);
+  margin: auto;
+}
+
+.modal-card__title {
+  margin: 0 0 16px;
+  font-size: 1.25rem;
+}
+
+.modal-card__actions {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.quote-preview-body {
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+
+.quote-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 0.875rem;
+}
+
+.quote-preview-table th,
+.quote-preview-table td {
+  border: 1px solid #e2e8f0;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.quote-preview-table th {
+  background: #f8fafc;
+}
+
+.quote-preview-grand {
+  font-size: 1.0625rem;
+  margin-top: 12px;
+}
+
+.quote-preview-banking {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed #e2e8f0;
+}
+
+.quote-preview-banking h3 {
+  margin: 0 0 8px;
+  font-size: 0.9375rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (min-width: 768px) {
+  .main-nav-inner {
+    flex-wrap: nowrap;
+  }
+
+  .geargrid-logo {
+    margin-right: 8px;
+  }
+}
+
+/* ----- Auth pages (login / register) ----- */
+body.auth-page {
+  background: #f4f6f9;
+}
+
+body.auth-page .main-content.auth-main {
+  max-width: none;
+  padding: 0;
+  margin: 0;
+}
+
+body.auth-page .site-footer {
+  background: #fff;
+  border-top: 1px solid #e2e8f0;
+}
+
+.auth-layout {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 52px);
+}
+
+.auth-layout__brand {
+  background: #0f1923;
+  color: #fff;
+  padding: 32px 24px 36px;
+}
+
+.auth-brand__inner {
+  max-width: 440px;
+  margin: 0 auto;
+}
+
+.auth-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 2rem;
+  line-height: 1.2;
+  margin-bottom: 16px;
+}
+
+.auth-logo__icon {
+  color: #f97316;
+  font-size: 2.25rem;
+}
+
+.auth-logo__gear {
+  color: #fff;
+}
+
+.auth-logo__grid {
+  color: #f97316;
+}
+
+.auth-logo__sa {
+  color: #fff;
+}
+
+.auth-brand__tagline {
+  margin: 0 0 28px;
+  font-size: 1.125rem;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 500;
+}
+
+.auth-features {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.auth-features li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-size: 0.9375rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.auth-features__check {
+  color: #f97316;
+  font-weight: 700;
+  flex-shrink: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.auth-layout__form {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 20px 36px;
+  background: #f4f6f9;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: #fff;
+  border-radius: 12px;
+  padding: 28px 24px 32px;
+  box-shadow: 0 4px 24px rgba(15, 25, 35, 0.08);
+  border: 1px solid #e8ecf1;
+}
+
+.auth-card__title {
+  margin: 0 0 8px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+}
+
+.auth-card__subtitle {
+  margin: 0 0 20px;
+  font-size: 0.9375rem;
+  color: #64748b;
+  line-height: 1.45;
+}
+
+.auth-card__success {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  background: #dcfce7;
+  border: 1px solid #86efac;
+  color: #166534;
+  border-radius: 8px;
+  font-size: 0.875rem;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.auth-form__label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #475569;
+  margin: 14px 0 6px;
+}
+
+.auth-form__label:first-of-type {
+  margin-top: 0;
+}
+
+.auth-form input {
+  display: block;
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 0.9375rem;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.auth-form input:focus {
+  outline: none;
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.2);
+}
+
+.auth-form__submit {
+  width: 100%;
+  margin-top: 22px;
+  margin-bottom: 0;
+  min-height: 48px;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.auth-card__link {
+  margin: 16px 0 0;
+  text-align: center;
+  font-size: 0.875rem;
+}
+
+.auth-card__link a {
+  color: #0066cc;
+  font-weight: 500;
+}
+
+.auth-card__footer {
+  margin: 20px 0 0;
+  padding-top: 18px;
+  border-top: 1px solid #e2e8f0;
+  text-align: center;
+  font-size: 0.875rem;
+  color: #64748b;
+}
+
+.auth-card__footer a {
+  color: #f97316;
+  font-weight: 600;
+}
+
+.auth-card .error {
+  margin: 0 0 16px;
+}
+
+@media (min-width: 900px) {
+  .auth-layout {
+    flex-direction: row;
+    min-height: calc(100vh - 48px);
+  }
+
+  .auth-layout__brand {
+    flex: 1 1 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 40px;
+  }
+
+  .auth-brand__inner {
+    max-width: 480px;
+    margin: 0;
+  }
+
+  .auth-logo {
+    font-size: 2.5rem;
+    margin-bottom: 20px;
+  }
+
+  .auth-logo__icon {
+    font-size: 2.75rem;
+  }
+
+  .auth-brand__tagline {
+    font-size: 1.25rem;
+    margin-bottom: 36px;
+  }
+
+  .auth-features li {
+    font-size: 1rem;
+    margin-bottom: 16px;
+  }
+
+  .auth-layout__form {
+    flex: 1 1 50%;
+    padding: 48px 40px;
+  }
+
+  .auth-card {
+    padding: 36px 32px 40px;
+  }
 }

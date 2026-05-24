@@ -43,7 +43,7 @@
         <th>Days</th>
       </tr>
       {% for item in items %}
-      <tr class="js-quote-line" data-unit-price="{{ (item['price'] or 0)|int }}">
+      <tr class="js-quote-line" data-unit-price="{{ (item['price'] or 0)|int }}" data-line-name="{{ item['name']|e }}" data-line-type="owned">
         <td data-label="Equipment / Description">{{ item["name"] }}</td>
         <td data-label="Unit Price">R{{ item["price"] or 0 }}</td>
         <td data-label="Units (max {{ item['qty_available'] }})"><input type="number" min="0" max="{{ item['qty_available'] }}" class="js-qty" name="qty_{{ item['id'] }}" value="0"></td>
@@ -68,7 +68,7 @@
         <th>Show on client quote</th>
       </tr>
       {% for sr in sub_rentals %}
-      <tr class="js-quote-line" data-unit-price="{{ (sr['cost_per_unit'] or 0)|int }}">
+      <tr class="js-quote-line js-quote-line-sub" data-unit-price="{{ (sr['cost_per_unit'] or 0)|int }}" data-line-name="{{ sr['equipment_description']|e }}" data-line-type="sub">
         <td data-label="Description">{{ sr["equipment_description"] }}</td>
         <td data-label="Supplier">{{ sr["supplier_name"] }}</td>
         <td data-label="Available">{{ sr["quantity_available"] }}</td>
@@ -108,11 +108,26 @@
     <p class="meta">Edit for this quote if needed. Defaults from company settings.</p>
     <textarea name="quote_terms" id="quote_terms" rows="8" style="width:100%;max-width:640px">{{ company.get('terms_and_conditions') or '' }}</textarea>
     <br><br>
-    <button class="btn purple" type="submit">Create Quote</button>
+    <div class="form-actions-row">
+      <button type="button" class="btn btn-secondary-outline" id="quote-preview-btn">Preview Quote</button>
+      <button class="btn purple" type="submit" id="quote-submit-btn">Create Quote</button>
+    </div>
   {% else %}
     <p>No equipment or sub-rentals available to quote.</p>
   {% endif %}
 </form>
+
+<div id="quote-preview-modal" class="modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="quote-preview-title">
+  <div class="modal-card">
+    <h2 id="quote-preview-title" class="modal-card__title">Quote Preview</h2>
+    <div id="quote-preview-body" class="quote-preview-body"></div>
+    <div class="form-actions-row modal-card__actions">
+      <button type="button" class="btn purple" id="quote-preview-generate">Generate PDF</button>
+      <button type="button" class="btn btn-secondary-outline" id="quote-preview-edit">Edit Quote</button>
+    </div>
+  </div>
+</div>
+
 <p><a href="/">Back</a></p>
 <script>
 (function () {
@@ -191,6 +206,115 @@
   form.addEventListener("input", recalc);
   form.addEventListener("change", recalc);
   recalc();
+
+  var banking = {
+    bank_name: {{ (company.get('bank_name') or '')|tojson }},
+    bank_account_holder: {{ (company.get('bank_account_holder') or '')|tojson }},
+    bank_account_number: {{ (company.get('bank_account_number') or '')|tojson }},
+    bank_account_type: {{ (company.get('bank_account_type') or '')|tojson }},
+    bank_branch_code: {{ (company.get('bank_branch_code') or '')|tojson }},
+    bank_reference: {{ (company.get('bank_reference') or '')|tojson }}
+  };
+
+  function getTotals() {
+    var sub = 0;
+    var lines = [];
+    form.querySelectorAll("tr.js-quote-line").forEach(function (row) {
+      var price = parseInt(row.getAttribute("data-unit-price") || "0", 10) || 0;
+      var q = row.querySelector(".js-qty");
+      var d = row.querySelector(".js-days");
+      var qty = q ? (parseInt(q.value, 10) || 0) : 0;
+      var days = d ? (parseInt(d.value, 10) || 0) : 0;
+      if (days < 1) days = 1;
+      if (qty < 1) return;
+      if (row.classList.contains("js-quote-line-sub")) {
+        var showSel = row.querySelector("select[name^='sub_show_']");
+        if (showSel && showSel.value !== "1") return;
+      }
+      var lineTotal = qty * price * days;
+      sub += lineTotal;
+      lines.push({
+        name: row.getAttribute("data-line-name") || "Item",
+        qty: qty,
+        days: days,
+        unit: price,
+        total: lineTotal
+      });
+    });
+    var discPct = parseFloat((document.getElementById("discount_percent") || {}).value || "0");
+    if (isNaN(discPct) || discPct < 0) discPct = 0;
+    if (discPct > 100) discPct = 100;
+    var discAmt = Math.round(sub * discPct / 100);
+    var after = Math.max(0, sub - discAmt);
+    var vatOn = document.getElementById("vat_on") && document.getElementById("vat_on").checked;
+    var vatAmt = vatOn ? Math.round(after * vatRate / 100) : 0;
+    var grand = after + vatAmt;
+    return { lines: lines, sub: sub, discPct: discPct, discAmt: discAmt, vatAmt: vatAmt, grand: grand, vatOn: vatOn };
+  }
+
+  var modal = document.getElementById("quote-preview-modal");
+  var previewBody = document.getElementById("quote-preview-body");
+  var previewBtn = document.getElementById("quote-preview-btn");
+
+  function bankingHtml() {
+    var parts = [];
+    if (banking.bank_name) parts.push("<p><strong>Bank:</strong> " + banking.bank_name + "</p>");
+    if (banking.bank_account_holder) parts.push("<p><strong>Account holder:</strong> " + banking.bank_account_holder + "</p>");
+    if (banking.bank_account_number) parts.push("<p><strong>Account number:</strong> " + banking.bank_account_number + "</p>");
+    if (banking.bank_account_type) parts.push("<p><strong>Account type:</strong> " + banking.bank_account_type + "</p>");
+    if (banking.bank_branch_code) parts.push("<p><strong>Branch code:</strong> " + banking.bank_branch_code + "</p>");
+    if (banking.bank_reference) parts.push("<p><strong>Reference:</strong> " + banking.bank_reference + "</p>");
+    if (!parts.length) return "<p class=\"meta\">No banking details configured. Add them in Company Settings.</p>";
+    return "<div class=\"quote-preview-banking\"><h3>Banking details</h3>" + parts.join("") + "</div>";
+  }
+
+  function openPreview() {
+    if (!clientSelect || !clientSelect.value) {
+      alert("Please select a client first.");
+      return;
+    }
+    var jobName = (document.getElementById("job_name") || {}).value || "";
+    if (!jobName.trim()) {
+      alert("Job name is required.");
+      return;
+    }
+    var totals = getTotals();
+    if (!totals.lines.length) {
+      alert("Add at least one line item with quantity greater than zero.");
+      return;
+    }
+    var clientName = clientSelect.options[clientSelect.selectedIndex].text;
+    var html = "<p><strong>Client:</strong> " + clientName + "</p>";
+    html += "<p><strong>Job:</strong> " + jobName + "</p>";
+    html += "<table class=\"quote-preview-table\"><thead><tr><th>Item</th><th>Qty</th><th>Days</th><th>Unit</th><th>Line total</th></tr></thead><tbody>";
+    totals.lines.forEach(function (ln) {
+      html += "<tr><td>" + ln.name + "</td><td>" + ln.qty + "</td><td>" + ln.days + "</td><td>R" + ln.unit + "</td><td>R" + ln.total + "</td></tr>";
+    });
+    html += "</tbody></table>";
+    html += "<p><strong>Subtotal:</strong> R" + totals.sub + "</p>";
+    html += "<p><strong>Discount (" + totals.discPct + "%):</strong> R" + totals.discAmt + "</p>";
+    html += "<p><strong>VAT:</strong> R" + totals.vatAmt + (totals.vatOn ? "" : " (not applied)") + "</p>";
+    html += "<p class=\"quote-preview-grand\"><strong>Grand total:</strong> R" + totals.grand + "</p>";
+    html += bankingHtml();
+    previewBody.innerHTML = html;
+    modal.hidden = false;
+    document.body.classList.add("modal-open");
+  }
+
+  function closePreview() {
+    modal.hidden = true;
+    document.body.classList.remove("modal-open");
+  }
+
+  if (previewBtn) previewBtn.addEventListener("click", openPreview);
+  document.getElementById("quote-preview-edit").addEventListener("click", closePreview);
+  document.getElementById("quote-preview-generate").addEventListener("click", function () {
+    closePreview();
+    form.requestSubmit(document.getElementById("quote-submit-btn"));
+  });
+  modal.addEventListener("click", function (e) {
+    if (e.target === modal) closePreview();
+  });
 })();
 </script>
 {% endblock %}

@@ -1,14 +1,34 @@
 {% extends "base.html" %}
 {% block content %}
+{% if success_name %}
+  <div class="alert alert-success" role="status">✓ {{ success_name }} added successfully!</div>
+{% endif %}
 {% if request.query_params.get("error") %}
   <p class="error">{{ request.query_params.get("error") }}</p>
 {% endif %}
-<form method="post">
+<form method="post" id="add-equipment-form" class="equipment-form">
   <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
-  <input name="name" placeholder="Equipment name" required>
-  <input name="quantity" placeholder="Quantity (units)" type="number" min="1" value="1" required>
-  <input name="price" placeholder="Price" type="number" min="0" required>
+  <label for="name">Equipment name</label>
+  <input id="name" name="name" placeholder="Equipment name" required>
+  <label for="category">Category</label>
+  <select id="category" name="category">
+    <option value="">— Select category —</option>
+    {% for cat in equipment_categories %}
+    <option value="{{ cat }}">{{ cat }}</option>
+    {% endfor %}
+  </select>
+  <label for="quantity">Quantity (units)</label>
+  <input id="quantity" name="quantity" placeholder="Quantity (units)" type="number" min="1" value="1" required>
+  <label for="price">Price</label>
+  <input id="price" name="price" placeholder="Price" type="number" min="0" required>
   <button class="btn blue" type="submit">Add</button>
 </form>
+{% if success_name %}
+<div class="form-actions-row">
+  <a class="btn blue" href="/add">Add Another Equipment</a>
+  <a class="btn btn-secondary-outline" href="/">Go to Dashboard</a>
+</div>
+{% else %}
 <p><a href="/">Back</a></p>
+{% endif %}
 {% endblock %}

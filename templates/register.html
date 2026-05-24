@@ -1,14 +1,44 @@
 {% extends "base.html" %}
-{% block content %}
-{% if request.query_params.get("error") %}
-  <p class="error">{{ request.query_params.get("error") }}</p>
-{% endif %}
-<form method="post">
-  <input name="company_name" placeholder="Company Name" required>
-  <input name="full_name" placeholder="Your Full Name" required>
-  <input type="email" name="email" placeholder="Email" required>
-  <input type="password" name="password" placeholder="Password (min 6 chars)" required>
-  <button class="btn blue" type="submit">Create Account</button>
-</form>
-<p>Already have an account? <a href="/login">Login</a></p>
+{% block body_class %}auth-page{% endblock %}
+{% block main_class %}auth-main{% endblock %}
+{% block page_shell %}
+<div class="auth-layout">
+  <aside class="auth-layout__brand" aria-label="GearGrid SA">
+    <div class="auth-brand__inner">
+      <div class="auth-logo" aria-hidden="true">
+        <span class="auth-logo__icon">⚙</span>
+        <span class="auth-logo__gear">Gear</span><span class="auth-logo__grid">Grid</span><span class="auth-logo__sa"> SA</span>
+      </div>
+      <p class="auth-brand__tagline">The smart way to manage your equipment rentals</p>
+      <ul class="auth-features">
+        <li><span class="auth-features__check" aria-hidden="true">✓</span> Real-time inventory and stock tracking</li>
+        <li><span class="auth-features__check" aria-hidden="true">✓</span> Professional quotes and invoices with PDF export</li>
+        <li><span class="auth-features__check" aria-hidden="true">✓</span> Job management and warehouse prep sheets</li>
+        <li><span class="auth-features__check" aria-hidden="true">✓</span> Multi-user access with role-based permissions</li>
+        <li><span class="auth-features__check" aria-hidden="true">✓</span> Sub-rental tracking and supplier management</li>
+      </ul>
+    </div>
+  </aside>
+  <section class="auth-layout__form" aria-label="Register">
+    <div class="auth-card">
+      <h1 class="auth-card__title">Get started for free</h1>
+      <p class="auth-card__subtitle">Set up your company account in minutes</p>
+      {% if request.query_params.get("error") %}
+        <p class="error">{{ request.query_params.get("error") }}</p>
+      {% endif %}
+      <form method="post" class="auth-form">
+        <label class="auth-form__label" for="reg-company">Company name</label>
+        <input id="reg-company" name="company_name" placeholder="Company Name" required autocomplete="organization">
+        <label class="auth-form__label" for="reg-name">Your full name</label>
+        <input id="reg-name" name="full_name" placeholder="Your Full Name" required autocomplete="name">
+        <label class="auth-form__label" for="reg-email">Email</label>
+        <input id="reg-email" type="email" name="email" placeholder="Email" required autocomplete="email">
+        <label class="auth-form__label" for="reg-password">Password</label>
+        <input id="reg-password" type="password" name="password" placeholder="Password (min 6 chars)" required autocomplete="new-password">
+        <button class="btn blue auth-form__submit" type="submit">Create Account</button>
+      </form>
+      <p class="auth-card__footer">Already have an account? <a href="/login">Login</a></p>
+    </div>
+  </section>
+</div>
 {% endblock %}

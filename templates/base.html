@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ title }} - AVMAN</title>
+  <title>{{ title }} - GearGrid SA</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   {% if current_user %}
   {% set path = request.url.path %}
   <header class="site-header">
@@ -29,6 +29,10 @@
     </div>
     <nav class="main-nav" aria-label="Main">
       <div class="main-nav-inner">
+      <a href="/" class="geargrid-logo" aria-label="GearGrid SA home">
+        <span class="geargrid-logo__icon" aria-hidden="true">⚙</span>
+        <span class="geargrid-logo__gear">Gear</span><span class="geargrid-logo__grid">Grid</span><span class="geargrid-logo__sa"> SA</span>
+      </a>
       <input type="checkbox" id="nav-toggle" class="nav-toggle" aria-hidden="true" tabindex="-1">
       <label for="nav-toggle" class="hamburger" aria-label="Open menu" role="button"></label>
       <div class="nav-panel">
@@ -67,11 +71,18 @@
   </header>
   {% endif %}
 
-  <main class="main-content">
+  <main class="main-content {% block main_class %}{% endblock %}">
+    {% block page_shell %}
     <div class="content-card">
       <h1 class="page-title">{{ title }}</h1>
       {% block content %}{% endblock %}
     </div>
+    {% endblock %}
   </main>
+
+  <footer class="site-footer">
+    <a class="site-footer__support" href="mailto:support@geargridsa.co.za">Contact Support</a>
+    <span class="site-footer__powered">Powered by GearGrid SA</span>
+  </footer>
 </body>
 </html>

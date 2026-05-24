@@ -1,5 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
+{% if show_onboarding %}
+<section class="onboarding-checklist" aria-label="Getting started">
+  <h2 class="onboarding-checklist__title">Welcome to GearGrid SA! Get started:</h2>
+  <ul class="onboarding-checklist__list">
+    <li><span aria-hidden="true">☐</span> <a href="/settings">Upload your company logo</a> (Company Settings)</li>
+    <li><span aria-hidden="true">☐</span> <a href="/add">Add your first equipment</a></li>
+    <li><span aria-hidden="true">☐</span> <a href="/clients">Add your first client</a></li>
+    <li><span aria-hidden="true">☐</span> <a href="/quote">Create your first quote</a></li>
+  </ul>
+</section>
+{% endif %}
+
 <div class="dashboard-tabs" data-dashboard-tabs>
   <div class="dashboard-tabs__bar" role="tablist" aria-label="Dashboard sections">
     <button type="button" class="dashboard-tabs__btn dashboard-tabs__btn--active" role="tab" aria-selected="true" aria-controls="panel-equipment" id="tab-equipment" data-tab="equipment">Equipment</button>
@@ -7,30 +19,47 @@
   </div>
 
   <div class="dashboard-tabs__panel" id="panel-equipment" role="tabpanel" aria-labelledby="tab-equipment">
-    <div class="stock-summary" aria-label="Stock overview">
-      <a href="/" class="stock-summary__item stock-summary__item--neutral {% if stock_filter == 'all' %}stock-summary__item--active{% endif %}">
+    <div class="stock-summary" aria-label="Stock overview" data-stock-filters>
+      <button type="button" class="stock-summary__item stock-summary__item--neutral stock-summary__item--active" data-stock-filter="all" aria-pressed="true">
         <span class="stock-summary__label">Total units</span>
         <span class="stock-summary__value">{{ total_count }}</span>
-      </a>
-      <a href="/?stock=available" class="stock-summary__item stock-summary__item--available {% if stock_filter == 'available' %}stock-summary__item--active{% endif %}">
+      </button>
+      <button type="button" class="stock-summary__item stock-summary__item--available" data-stock-filter="available" aria-pressed="false">
         <span class="stock-summary__label">Available</span>
         <span class="stock-summary__value">{{ available_count }}</span>
-      </a>
-      <a href="/?stock=rented" class="stock-summary__item stock-summary__item--rented {% if stock_filter == 'rented' %}stock-summary__item--active{% endif %}">
+      </button>
+      <button type="button" class="stock-summary__item stock-summary__item--rented" data-stock-filter="rented" aria-pressed="false">
         <span class="stock-summary__label">Rented out</span>
         <span class="stock-summary__value">{{ rented_count }}</span>
-      </a>
-      <a href="/?stock=overdue" class="stock-summary__item stock-summary__item--overdue {% if stock_filter == 'overdue' %}stock-summary__item--active{% endif %}">
+      </button>
+      <button type="button" class="stock-summary__item stock-summary__item--overdue" data-stock-filter="overdue" aria-pressed="false">
         <span class="stock-summary__label">Overdue units</span>
         <span class="stock-summary__value">{{ overdue_count }}</span>
-      </a>
+      </button>
     </div>
 
+    <div class="dashboard-filters" data-equipment-filters>
+      <label class="dashboard-filters__search-wrap">
+        <span class="visually-hidden">Search equipment</span>
+        <input type="search" class="dashboard-filters__search" id="equipment-search" placeholder="Search equipment by name…" autocomplete="off">
+      </label>
+      <label class="dashboard-filters__category-wrap">
+        <span class="dashboard-filters__label">Category</span>
+        <select class="dashboard-filters__category" id="equipment-category-filter">
+          <option value="">All categories</option>
+          {% for cat in equipment_categories %}
+          <option value="{{ cat }}">{{ cat }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
+    <p class="empty-state" id="equipment-empty-filter" hidden>No equipment matches your filters.</p>
     {% if not items %}
-      <p class="empty-state">No equipment in this view{% if stock_filter != 'all' %}. <a href="/">Show all</a>{% else %}. Add your first item.{% endif %}</p>
+      <p class="empty-state" id="equipment-empty-all">No equipment yet. Add your first item.</p>
     {% endif %}
 
-    <div class="equipment-grid">
+    <div class="equipment-grid" id="equipment-grid">
     {% for item in items %}
       {% set qtot = (item['quantity'] or 1)|int %}
       {% set qrent = (item['quantity_rented'] or 0)|int %}
@@ -47,10 +76,20 @@
         {% set badge_class = "badge badge-available" %}
         {% set badge_label = "Available" %}
       {% endif %}
-      <article class="equipment-card {% if is_overdue %}equipment-card--overdue{% endif %}">
+      <article class="equipment-card js-equipment-card {% if is_overdue %}equipment-card--overdue{% endif %}"
+        data-name="{{ item['name']|lower }}"
+        data-category="{{ item.get('category') or '' }}"
+        data-has-available="{{ 1 if qavail > 0 else 0 }}"
+        data-has-rented="{{ 1 if qrent > 0 else 0 }}"
+        data-is-overdue="{{ 1 if is_overdue else 0 }}">
         <div class="equipment-card__body">
           <div class="equipment-card__header-row">
-            <h2 class="equipment-card__title">{{ item["name"] }}</h2>
+            <div class="equipment-card__title-wrap">
+              <h2 class="equipment-card__title">{{ item["name"] }}</h2>
+              {% if item.get('category') %}
+              <span class="badge badge-category">{{ item["category"] }}</span>
+              {% endif %}
+            </div>
             <span class="{{ badge_class }}">{{ badge_label }}</span>
           </div>
           <p class="equipment-card__price">R{{ item["price"] or 0 }} <span class="equipment-card__price-label">per unit</span></p>
@@ -64,7 +103,7 @@
               <span class="equipment-card__meta-value equipment-card__qty-available">{{ qavail }}</span>
             </div>
             <div class="equipment-card__meta-row">
-              <span class="equipment-card__meta-label">Rented out</span>
+              <span class="equipment-card__meta-label equipment-card__meta-label--nowrap">Rented out</span>
               <span class="equipment-card__meta-value equipment-card__qty-rented">{{ qrent }}</span>
             </div>
             <div class="equipment-card__meta-row">
@@ -125,7 +164,7 @@
                 <span class="equipment-card__meta-value equipment-card__qty-available">{{ qavail }}</span>
               </div>
               <div class="equipment-card__meta-row">
-                <span class="equipment-card__meta-label">In use</span>
+                <span class="equipment-card__meta-label equipment-card__meta-label--nowrap">In use</span>
                 <span class="equipment-card__meta-value equipment-card__qty-rented">{{ in_use }}</span>
               </div>
             </div>
@@ -229,24 +268,24 @@
 
   tabEquipment.addEventListener("click", function () {
     setTab("equipment");
-    if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search);
+    if (history.replaceState) history.replaceState(null, "", window.location.pathname);
     else window.location.hash = "";
   });
   tabHistory.addEventListener("click", function () {
     setTab("history");
-    if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search + "#history");
+    if (history.replaceState) history.replaceState(null, "", window.location.pathname + "#history");
     else window.location.hash = "history";
   });
   showAllBtn.addEventListener("click", function () {
     applyHistoryFilter("");
-    if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search + "#history");
+    if (history.replaceState) history.replaceState(null, "", window.location.pathname + "#history");
   });
   root.querySelectorAll(".js-dashboard-view-history").forEach(function (btn) {
     btn.addEventListener("click", function () {
       var n = btn.getAttribute("data-equipment-name") || "";
       setTab("history");
       applyHistoryFilter(n);
-      if (history.replaceState) history.replaceState(null, "", window.location.pathname + window.location.search + "#history");
+      if (history.replaceState) history.replaceState(null, "", window.location.pathname + "#history");
       else window.location.hash = "history";
       panelHistory.scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -254,6 +293,51 @@
   if (window.location.hash === "#history") {
     setTab("history");
   }
+
+  var stockFilter = "all";
+  var searchInput = document.getElementById("equipment-search");
+  var categorySelect = document.getElementById("equipment-category-filter");
+  var cards = root.querySelectorAll(".js-equipment-card");
+  var emptyFilter = document.getElementById("equipment-empty-filter");
+  var emptyAll = document.getElementById("equipment-empty-all");
+  var stockButtons = root.querySelectorAll("[data-stock-filter]");
+
+  function applyEquipmentFilters() {
+    var q = (searchInput && searchInput.value || "").trim().toLowerCase();
+    var cat = categorySelect ? categorySelect.value : "";
+    var visible = 0;
+    for (var i = 0; i < cards.length; i++) {
+      var card = cards[i];
+      var name = card.getAttribute("data-name") || "";
+      var cardCat = card.getAttribute("data-category") || "";
+      var matchSearch = !q || name.indexOf(q) !== -1;
+      var matchCat = !cat || cardCat === cat;
+      var matchStock = true;
+      if (stockFilter === "available") matchStock = card.getAttribute("data-has-available") === "1";
+      else if (stockFilter === "rented") matchStock = card.getAttribute("data-has-rented") === "1";
+      else if (stockFilter === "overdue") matchStock = card.getAttribute("data-is-overdue") === "1";
+      var show = matchSearch && matchCat && matchStock;
+      card.hidden = !show;
+      if (show) visible++;
+    }
+    if (emptyFilter) emptyFilter.hidden = visible > 0 || cards.length === 0;
+    if (emptyAll) emptyAll.hidden = cards.length > 0 || visible > 0;
+  }
+
+  if (searchInput) searchInput.addEventListener("input", applyEquipmentFilters);
+  if (categorySelect) categorySelect.addEventListener("change", applyEquipmentFilters);
+  stockButtons.forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      stockFilter = btn.getAttribute("data-stock-filter") || "all";
+      stockButtons.forEach(function (b) {
+        var active = b === btn;
+        b.classList.toggle("stock-summary__item--active", active);
+        b.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      applyEquipmentFilters();
+    });
+  });
+  applyEquipmentFilters();
 })();
 </script>
 {% endblock %}

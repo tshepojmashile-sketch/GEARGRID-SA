@@ -26,19 +26,19 @@
       <button type="submit" class="btn blue">Mark active (equipment out)</button>
     </form>
     {% elif job["status"] == "active" %}
-    <form method="post" action="/warehouse/job/{{ job['id'] }}/status" class="warehouse-status-form">
+    <form method="post" action="/warehouse/job/{{ job['id'] }}/status" class="warehouse-status-form js-job-status-form" data-current-status="{{ job['status'] }}">
       <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
       <input type="hidden" name="job_status" value="done">
       <button type="submit" class="btn green">Mark done</button>
     </form>
     {% endif %}
   {% else %}
-  <form method="post" action="/jobs/{{ job['id'] }}/status" class="warehouse-status-form" style="margin-bottom:16px">
+  <form method="post" action="/jobs/{{ job['id'] }}/status" class="warehouse-status-form js-job-status-form" style="margin-bottom:16px" data-current-status="{{ job['status'] }}">
     <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
     <input type="hidden" name="redirect_to" value="/warehouse/job/{{ job['id'] }}">
     <label class="meta" for="mgmt-status">Job status</label>
     <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px">
-      <select name="job_status" id="mgmt-status">
+      <select name="job_status" id="mgmt-status" class="js-job-status-select">
         {% for s in ["upcoming", "active", "done"] %}
         <option value="{{ s }}" {% if job["status"] == s %}selected{% endif %}>{{ s }}</option>
         {% endfor %}
@@ -84,4 +84,22 @@
     {% endfor %}
   </ul>
 </div>
+<script>
+(function () {
+  document.querySelectorAll(".js-job-status-form").forEach(function (form) {
+    form.addEventListener("submit", function (e) {
+      var sel = form.querySelector(".js-job-status-select");
+      var hidden = form.querySelector("input[name='job_status']");
+      var newStatus = sel ? sel.value : (hidden ? hidden.value : "");
+      if (!newStatus) return;
+      var current = form.getAttribute("data-current-status") || "";
+      if (newStatus === "done" && current !== "done") {
+        if (!confirm("Mark job as Done? This will return all equipment to available stock.")) {
+          e.preventDefault();
+        }
+      }
+    });
+  });
+})();
+</script>
 {% endblock %}

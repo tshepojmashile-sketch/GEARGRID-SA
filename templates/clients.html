@@ -25,7 +25,11 @@
 <hr style="margin:24px 0">
 
 <h2 class="title" style="font-size:1.1rem">Clients</h2>
-<table class="quote-dash-table">
+<label class="dashboard-filters__search-wrap" style="display:block;margin-bottom:16px;max-width:100%">
+  <span class="visually-hidden">Search clients</span>
+  <input type="search" class="dashboard-filters__search" id="client-search" placeholder="Search by company or contact person…" autocomplete="off" style="width:100%;max-width:480px">
+</label>
+<table class="quote-dash-table" id="clients-table">
   <thead>
     <tr>
       <th>Company name</th>
@@ -37,7 +41,9 @@
   </thead>
   <tbody>
     {% for c in clients %}
-    <tr>
+    <tr class="js-client-row"
+        data-company="{{ c['name']|lower }}"
+        data-contact="{{ (c.get('contact_person') or '')|lower }}">
       <td data-label="Company name">{{ c["name"] }}</td>
       <td data-label="Contact person">{{ c["contact_person"] or "—" }}</td>
       <td data-label="Phone">{{ c["phone"] or "—" }}</td>
@@ -45,9 +51,31 @@
       <td data-label=""><a class="btn btn-sm btn-secondary-outline" href="/clients/{{ c['id'] }}/edit">Edit</a></td>
     </tr>
     {% else %}
-    <tr><td colspan="5">No clients yet.</td></tr>
+    <tr id="clients-empty-row"><td colspan="5">No clients yet.</td></tr>
     {% endfor %}
   </tbody>
 </table>
+<p class="empty-state" id="clients-empty-filter" hidden>No clients match your search.</p>
 <p><a href="/">Back</a></p>
+<script>
+(function () {
+  var input = document.getElementById("client-search");
+  var rows = document.querySelectorAll(".js-client-row");
+  var emptyMsg = document.getElementById("clients-empty-filter");
+  if (!input || !rows.length) return;
+  function filter() {
+    var q = input.value.trim().toLowerCase();
+    var visible = 0;
+    rows.forEach(function (row) {
+      var company = row.getAttribute("data-company") || "";
+      var contact = row.getAttribute("data-contact") || "";
+      var show = !q || company.indexOf(q) !== -1 || contact.indexOf(q) !== -1;
+      row.hidden = !show;
+      if (show) visible++;
+    });
+    if (emptyMsg) emptyMsg.hidden = visible > 0;
+  }
+  input.addEventListener("input", filter);
+})();
+</script>
 {% endblock %}

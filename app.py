@@ -38,6 +38,17 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 VALID_ROLES = {"admin", "management", "warehouse"}
 JOB_STATUSES = {"upcoming", "active", "done"}
 QUOTE_STATUSES = {"pending", "approved", "rejected"}
+EQUIPMENT_CATEGORIES = (
+    "Audio",
+    "Video",
+    "Lighting",
+    "Staging",
+    "Power",
+    "Rigging",
+    "Backline",
+    "Transport",
+    "Other",
+)
 logger = logging.getLogger("rental_saas")
 
 app = FastAPI(title="Rental SaaS App")
@@ -207,6 +218,8 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE equipment ADD COLUMN quantity INTEGER NOT NULL DEFAULT 1")
         if not has_column(cursor, "equipment", "quantity_rented"):
             cursor.execute("ALTER TABLE equipment ADD COLUMN quantity_rented INTEGER NOT NULL DEFAULT 0")
+        if not has_column(cursor, "equipment", "category"):
+            cursor.execute("ALTER TABLE equipment ADD COLUMN category TEXT NOT NULL DEFAULT ''")
         cursor.execute("UPDATE equipment SET quantity=1 WHERE quantity IS NULL OR quantity < 1")
         cursor.execute("UPDATE equipment SET quantity_rented=0 WHERE quantity_rented IS NULL")
         cursor.execute("UPDATE equipment SET quantity_rented=1 WHERE status='rented' AND quantity_rented=0")
@@ -1990,15 +2003,8 @@ def home(request: Request):
         overdue_count = sum(
             (qty_rented(r) if (r["due_date"] and r["due_date"] < today and qty_rented(r) > 0) else 0) for r in all_items
         )
-        stock_filter = request.query_params.get("stock", "all")
-        if stock_filter == "available":
-            items = [r for r in all_items if qty_available(r) > 0]
-        elif stock_filter == "rented":
-            items = [r for r in all_items if qty_rented(r) > 0]
-        elif stock_filter == "overdue":
-            items = [r for r in all_items if qty_rented(r) > 0 and r["due_date"] and r["due_date"] < today]
-        else:
-            items = list(all_items)
+        items = list(all_items)
+        show_onboarding = len(all_items) == 0
         cursor.execute(
             "SELECT * FROM rental_history WHERE company_id=%s ORDER BY id DESC",
             (user["company_id"],),
@@ -2018,7 +2024,8 @@ def home(request: Request):
                 "items": items,
                 "today": today,
                 "current_user": user,
-                "stock_filter": stock_filter,
+                "equipment_categories": EQUIPMENT_CATEGORIES,
+                "show_onboarding": show_onboarding,
                 "total_count": total_count,
                 "available_count": available_count,
                 "rented_count": rented_count,
@@ -2763,11 +2770,21 @@ def add_page(request: Request):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
-    return templates.TemplateResponse(request=request, name="add.html", context={"title": "Add Equipment", "current_user": user})
+    return templates.TemplateResponse(
+        request=request,
+        name="add.html",
+        context={"title": "Add Equipment", "current_user": user, "equipment_categories": EQUIPMENT_CATEGORIES},
+    )
 
 
 @app.post("/add")
-async def add_equipment(request: Request, name: str = Form(...), price: int = Form(...), quantity: int = Form(default=1)):
+async def add_equipment(
+    request: Request,
+    name: str = Form(...),
+    price: int = Form(...),
+    quantity: int = Form(default=1),
+    category: str = Form(default=""),
+):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
@@ -2780,13 +2797,26 @@ async def add_equipment(request: Request, name: str = Form(...), price: int = Fo
         return RedirectResponse(url="/add?error=Price%20must%20be%200%20or%20more", status_code=303)
     if quantity < 1:
         return RedirectResponse(url="/add?error=Quantity%20must%20be%20at%20least%201", status_code=303)
+    clean_category = category.strip() if category.strip() in EQUIPMENT_CATEGORIES else ""
     with get_db() as conn:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute(
-            "INSERT INTO equipment (name, status, price, prep_status, company_id, quantity, quantity_rented) VALUES (%s, %s, %s, %s, %s, %s, 0)",
-            (clean_name, "available", price, "pending", user["company_id"], quantity),
+            """
+            INSERT INTO equipment (name, status, price, prep_status, company_id, quantity, quantity_rented, category)
+            VALUES (%s, %s, %s, %s, %s, %s, 0, %s)
+            """,
+            (clean_name, "available", price, "pending", user["company_id"], quantity, clean_category),
         )
-        return RedirectResponse(url="/", status_code=303)
+        return templates.TemplateResponse(
+            request=request,
+            name="add.html",
+            context={
+                "title": "Add Equipment",
+                "current_user": user,
+                "equipment_categories": EQUIPMENT_CATEGORIES,
+                "success_name": clean_name,
+            },
+        )
     
     
 @app.get("/equipment/{item_id}/edit", response_class=HTMLResponse)
@@ -2800,11 +2830,27 @@ def edit_equipment_page(request: Request, item_id: int):
         item = cursor.fetchone()
         if not item:
             return render_message(request, "Error", "Equipment not found.", "/", user)
-        return templates.TemplateResponse(request=request, name="equipment_edit.html", context={"title": "Edit Equipment", "item": item, "current_user": user})
+        return templates.TemplateResponse(
+            request=request,
+            name="equipment_edit.html",
+            context={
+                "title": "Edit Equipment",
+                "item": item,
+                "current_user": user,
+                "equipment_categories": EQUIPMENT_CATEGORIES,
+            },
+        )
     
     
 @app.post("/equipment/{item_id}/edit")
-async def edit_equipment(request: Request, item_id: int, name: str = Form(...), price: int = Form(...), quantity: int = Form(...)):
+async def edit_equipment(
+    request: Request,
+    item_id: int,
+    name: str = Form(...),
+    price: int = Form(...),
+    quantity: int = Form(...),
+    category: str = Form(default=""),
+):
     user, response = get_current_user(request, allowed_roles={"admin", "management"})
     if response:
         return response
@@ -2826,7 +2872,11 @@ async def edit_equipment(request: Request, item_id: int, name: str = Form(...), 
         qr = int(cur["quantity_rented"] or 0)
         if quantity < qr:
             return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Quantity%20cannot%20be%20less%20than%20rented%20units", status_code=303)
-        cursor.execute("UPDATE equipment SET name=%s, price=%s, quantity=%s WHERE id=%s AND company_id=%s", (clean_name, price, quantity, item_id, user["company_id"]))
+        clean_category = category.strip() if category.strip() in EQUIPMENT_CATEGORIES else ""
+        cursor.execute(
+            "UPDATE equipment SET name=%s, price=%s, quantity=%s, category=%s WHERE id=%s AND company_id=%s",
+            (clean_name, price, quantity, clean_category, item_id, user["company_id"]),
+        )
         sync_equipment_row(cursor, item_id, user["company_id"])
         return RedirectResponse(url="/", status_code=303)
     
