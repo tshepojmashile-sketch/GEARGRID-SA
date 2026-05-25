@@ -3401,6 +3401,161 @@ async def warehouse_prep_received_toggle(request: Request, job_id: int, prep_ite
         return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
 
 
+@app.post("/warehouse/job/{job_id}/sign-out-all")
+async def warehouse_equipment_sign_out_all(request: Request, job_id: int):
+    user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
+    form = await request.form()
+    collected_by = str(form.get("collected_by_name", "")).strip()
+    if not collected_by:
+        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Collected%20by%20name%20is%20required", status_code=303)
+    contact = str(form.get("collected_by_contact", "")).strip()
+    job_notes = str(form.get("notes", "")).strip()
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT status FROM jobs WHERE id=%s AND company_id=%s",
+            (job_id, user["company_id"]),
+        )
+        job = cursor.fetchone()
+        if not job or job["status"] not in ("upcoming", "active"):
+            return RedirectResponse(
+                url=f"/warehouse/job/{job_id}?error=Sign-out%20not%20available%20for%20this%20job%20status",
+                status_code=303,
+            )
+        cursor.execute(
+            """
+            SELECT id, equipment_id, equipment_name, line_type
+            FROM job_prep_items
+            WHERE job_id=%s AND company_id=%s
+            ORDER BY id ASC
+            """,
+            (job_id, user["company_id"]),
+        )
+        prep_items = cursor.fetchall()
+        movements = list_equipment_movements_for_job(cursor, user["company_id"], job_id)
+        to_sign: list[tuple[dict, str]] = []
+        for prep in prep_items:
+            if (prep.get("line_type") or "owned") != "owned":
+                continue
+            prep_id = int(prep["id"])
+            if prep_item_collection_state(movements, prep_id) == "out":
+                continue
+            condition_out = str(form.get(f"condition_out_{prep_id}", "")).strip()
+            if condition_out not in EQUIPMENT_CONDITIONS_OUT:
+                return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20condition%20on%20departure", status_code=303)
+            to_sign.append((prep, condition_out))
+        if not to_sign:
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=No%20equipment%20to%20sign%20out", status_code=303)
+        now = datetime.utcnow().isoformat()
+        for prep, condition_out in to_sign:
+            cursor.execute(
+                """
+                INSERT INTO equipment_movements
+                (company_id, job_id, prep_item_id, equipment_id, movement_type,
+                 collected_by_name, collected_by_contact, condition_out, notes,
+                 processed_by_user_id, processed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user["company_id"],
+                    job_id,
+                    prep["id"],
+                    prep.get("equipment_id"),
+                    "collected",
+                    collected_by,
+                    contact,
+                    condition_out,
+                    job_notes,
+                    user["user_id"],
+                    now,
+                ),
+            )
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+
+
+@app.post("/warehouse/job/{job_id}/sign-in-all")
+async def warehouse_equipment_sign_in_all(request: Request, job_id: int):
+    user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
+    form = await request.form()
+    returned_by = str(form.get("returned_by_name", "")).strip()
+    if not returned_by:
+        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Returned%20by%20name%20is%20required", status_code=303)
+    job_notes = str(form.get("notes", "")).strip()
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT status FROM jobs WHERE id=%s AND company_id=%s",
+            (job_id, user["company_id"]),
+        )
+        job = cursor.fetchone()
+        if not job:
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Job%20not%20found", status_code=303)
+        cursor.execute(
+            """
+            SELECT id, equipment_id, equipment_name, line_type
+            FROM job_prep_items
+            WHERE job_id=%s AND company_id=%s
+            ORDER BY id ASC
+            """,
+            (job_id, user["company_id"]),
+        )
+        prep_items = cursor.fetchall()
+        movements = list_equipment_movements_for_job(cursor, user["company_id"], job_id)
+        to_sign: list[tuple[dict, str]] = []
+        needs_damage_notes = False
+        for prep in prep_items:
+            if (prep.get("line_type") or "owned") != "owned":
+                continue
+            prep_id = int(prep["id"])
+            if prep_item_collection_state(movements, prep_id) != "out":
+                continue
+            condition_in = str(form.get(f"condition_in_{prep_id}", "")).strip()
+            if condition_in not in EQUIPMENT_CONDITIONS_IN:
+                return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20return%20condition", status_code=303)
+            if condition_in in ("Damaged", "Missing items"):
+                needs_damage_notes = True
+            to_sign.append((prep, condition_in))
+        if not to_sign:
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=No%20equipment%20to%20sign%20in", status_code=303)
+        if needs_damage_notes and not job_notes:
+            return RedirectResponse(
+                url=f"/warehouse/job/{job_id}?error=Notes%20required%20when%20any%20item%20is%20damaged%20or%20missing",
+                status_code=303,
+            )
+        now = datetime.utcnow().isoformat()
+        for prep, condition_in in to_sign:
+            cursor.execute(
+                """
+                INSERT INTO equipment_movements
+                (company_id, job_id, prep_item_id, equipment_id, movement_type,
+                 collected_by_name, condition_in, notes,
+                 processed_by_user_id, processed_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user["company_id"],
+                    job_id,
+                    prep["id"],
+                    prep.get("equipment_id"),
+                    "returned",
+                    returned_by,
+                    condition_in,
+                    job_notes,
+                    user["user_id"],
+                    now,
+                ),
+            )
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+
+
 @app.post("/warehouse/job/{job_id}/prep/{prep_item_id}/sign-out")
 async def warehouse_equipment_sign_out(request: Request, job_id: int, prep_item_id: int):
     user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
