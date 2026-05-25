@@ -45,6 +45,26 @@
           <button type="submit" class="btn btn-sm btn-primary-outline">Save</button>
         </form>
         <a class="btn btn-sm btn-secondary-outline" href="/warehouse/job/{{ j['id'] }}">Prep sheet</a>
+        {% set job_movements = movements_by_job.get(j['id'], []) %}
+        {% if job_movements %}
+        <details class="job-movements-details">
+          <summary>Movement history ({{ job_movements|length }})</summary>
+          <ul class="job-movements-list">
+            {% for m in job_movements %}
+            <li>
+              <span class="warehouse-movement-badge">{{ m['movement_type'] }}</span>
+              {{ m['equipment_name'] or 'Equipment' }} —
+              {% if m['movement_type'] == 'collected' %}
+              out: {{ m['condition_out'] or '—' }} by {{ m['collected_by_name'] or '—' }}
+              {% else %}
+              in: {{ m['condition_in'] or '—' }} by {{ m['collected_by_name'] or '—' }}
+              {% endif %}
+              <span class="meta">({{ m['processed_at'] }})</span>
+            </li>
+            {% endfor %}
+          </ul>
+        </details>
+        {% endif %}
       </td>
     </tr>
     {% else %}

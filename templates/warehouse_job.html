@@ -83,6 +83,113 @@
     <li class="warehouse-empty">No line items for this job.</li>
     {% endfor %}
   </ul>
+
+  {% if show_sign_sections %}
+  <section class="warehouse-sign-section">
+    <h2 class="title warehouse-sign-section__title">Sign out equipment</h2>
+    <p class="meta">Record when owned equipment leaves the warehouse.</p>
+    {% set ns = namespace(has_sign_out=false) %}
+    {% for row in prep_items %}
+      {% if (row['line_type'] or 'owned') == 'owned' and prep_states.get(row['id']) != 'out' %}
+        {% set ns.has_sign_out = true %}
+        <div class="warehouse-sign-card">
+          <p class="warehouse-sign-card__item"><strong>{{ row["equipment_name"] }}</strong> · Qty {{ row["quantity"] }}</p>
+          <form method="post" action="/warehouse/job/{{ job['id'] }}/prep/{{ row['id'] }}/sign-out" class="warehouse-sign-form">
+            <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+            <label>Collected by <span class="required">*</span>
+              <input type="text" name="collected_by_name" required autocomplete="name" placeholder="Full name">
+            </label>
+            <label>Contact number
+              <input type="tel" name="collected_by_contact" autocomplete="tel" placeholder="Phone">
+            </label>
+            <label>Condition on departure
+              <select name="condition_out" required>
+                {% for c in conditions_out %}
+                <option value="{{ c }}">{{ c }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>Notes
+              <textarea name="notes" rows="2" placeholder="Optional"></textarea>
+            </label>
+            <p class="warehouse-sign-meta"><strong>Processed by:</strong> {{ current_user['full_name'] }}</p>
+            <button type="submit" class="btn blue">Sign out</button>
+          </form>
+        </div>
+      {% endif %}
+    {% endfor %}
+    {% if not ns.has_sign_out %}
+    <p class="meta">All owned items are signed out or none to sign out.</p>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  <section class="warehouse-sign-section">
+    <h2 class="title warehouse-sign-section__title">Sign in equipment</h2>
+    <p class="meta">Record when signed-out equipment is returned.</p>
+    {% set ns2 = namespace(has_sign_in=false) %}
+    {% for row in prep_items %}
+      {% if (row['line_type'] or 'owned') == 'owned' and prep_states.get(row['id']) == 'out' %}
+        {% set ns2.has_sign_in = true %}
+        <div class="warehouse-sign-card">
+          <p class="warehouse-sign-card__item"><strong>{{ row["equipment_name"] }}</strong> · Qty {{ row["quantity"] }}</p>
+          <form method="post" action="/warehouse/job/{{ job['id'] }}/prep/{{ row['id'] }}/sign-in" class="warehouse-sign-form js-sign-in-form">
+            <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+            <label>Returned by <span class="required">*</span>
+              <input type="text" name="returned_by_name" required autocomplete="name" placeholder="Full name">
+            </label>
+            <label>Condition on return
+              <select name="condition_in" class="js-condition-in" required>
+                {% for c in conditions_in %}
+                <option value="{{ c }}">{{ c }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label class="js-damage-notes-wrap" hidden>Damage notes <span class="required">*</span>
+              <textarea name="damage_notes" class="js-damage-notes" rows="3" placeholder="Describe damage or missing items"></textarea>
+            </label>
+            <p class="warehouse-sign-meta"><strong>Processed by:</strong> {{ current_user['full_name'] }}</p>
+            <button type="submit" class="btn green">Sign in</button>
+          </form>
+        </div>
+      {% endif %}
+    {% endfor %}
+    {% if not ns2.has_sign_in %}
+    <p class="meta">No equipment currently signed out on this job.</p>
+    {% endif %}
+  </section>
+
+  <section class="warehouse-movements-section">
+    <h2 class="title warehouse-sign-section__title">Movement history</h2>
+    {% if movements %}
+    <div class="warehouse-movements-log">
+      {% for m in movements %}
+      <article class="warehouse-movement-entry warehouse-movement-entry--{{ m['movement_type'] }}">
+        <p class="warehouse-movement-entry__head">
+          <span class="warehouse-movement-badge">{{ m['movement_type'] }}</span>
+          <strong>{{ m['equipment_name'] or 'Equipment' }}</strong>
+        </p>
+        <ul class="warehouse-movement-entry__details">
+          {% if m['movement_type'] == 'collected' %}
+          <li><span>Collected by</span> {{ m['collected_by_name'] or '—' }}{% if m['collected_by_contact'] %} · {{ m['collected_by_contact'] }}{% endif %}</li>
+          <li><span>Condition out</span> {{ m['condition_out'] or '—' }}</li>
+          {% else %}
+          <li><span>Returned by</span> {{ m['collected_by_name'] or '—' }}</li>
+          <li><span>Condition in</span> {{ m['condition_in'] or '—' }}</li>
+          {% endif %}
+          {% if m['notes'] %}
+          <li><span>Notes</span> {{ m['notes'] }}</li>
+          {% endif %}
+          <li><span>Processed by</span> {{ m['processed_by_name'] or '—' }}</li>
+          <li><span>When</span> {{ m['processed_at'] }}</li>
+        </ul>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="meta">No sign-out or sign-in records yet.</p>
+    {% endif %}
+  </section>
 </div>
 <script>
 (function () {
@@ -97,6 +204,31 @@
         if (!confirm("Mark job as Done? This will return all equipment to available stock.")) {
           e.preventDefault();
         }
+      }
+    });
+  });
+
+  function updateDamageNotes(form) {
+    var sel = form.querySelector(".js-condition-in");
+    var wrap = form.querySelector(".js-damage-notes-wrap");
+    var ta = form.querySelector(".js-damage-notes");
+    if (!sel || !wrap) return;
+    var needs = sel.value === "Damaged" || sel.value === "Missing items";
+    wrap.hidden = !needs;
+    if (ta) ta.required = needs;
+  }
+
+  document.querySelectorAll(".js-sign-in-form").forEach(function (form) {
+    var sel = form.querySelector(".js-condition-in");
+    if (sel) sel.addEventListener("change", function () { updateDamageNotes(form); });
+    updateDamageNotes(form);
+    form.addEventListener("submit", function (e) {
+      updateDamageNotes(form);
+      var sel2 = form.querySelector(".js-condition-in");
+      var ta = form.querySelector(".js-damage-notes");
+      if (sel2 && ta && (sel2.value === "Damaged" || sel2.value === "Missing items") && !ta.value.trim()) {
+        e.preventDefault();
+        alert("Please enter damage notes for damaged or missing items.");
       }
     });
   });

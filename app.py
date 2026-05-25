@@ -38,7 +38,19 @@ BASE_URL = os.environ.get("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 VALID_ROLES = {"admin", "management", "warehouse"}
 JOB_STATUSES = {"upcoming", "active", "done"}
 QUOTE_STATUSES = {"pending", "approved", "rejected"}
-EQUIPMENT_CATEGORIES = (
+DEFAULT_EQUIPMENT_CATEGORIES = ("General", "Tools", "Vehicles", "Electronics", "Furniture", "Other")
+DEFAULT_TECHNICIAN_FUNCTIONS = (
+    ("Audio Technician", 0),
+    ("Video Technician", 0),
+    ("Lighting Technician", 0),
+    ("Camera Operator", 0),
+    ("Stage Manager", 0),
+    ("Driver", 0),
+    ("General Assistant", 0),
+)
+EQUIPMENT_CONDITIONS_OUT = frozenset({"Good", "Minor wear", "Damaged"})
+EQUIPMENT_CONDITIONS_IN = frozenset({"Good", "Minor wear", "Damaged", "Missing items"})
+LEGACY_EQUIPMENT_CATEGORIES = (
     "Audio",
     "Video",
     "Lighting",
@@ -49,6 +61,8 @@ EQUIPMENT_CATEGORIES = (
     "Transport",
     "Other",
 )
+PDF_NAVY_HEX = "#0f1923"
+TRANSPORT_TYPES = frozenset({"none", "fixed_fee", "per_km", "vehicle_hire"})
 logger = logging.getLogger("rental_saas")
 
 app = FastAPI(title="Rental SaaS App")
@@ -106,6 +120,257 @@ def compute_financial_totals(subtotal, discount_percent, vat_enabled, vat_percen
         "vat_amount": vat_amount,
         "grand_total": grand_total,
     }
+
+
+def seed_default_equipment_categories(cursor, company_id: int) -> None:
+    created = datetime.utcnow().isoformat()
+    for name in DEFAULT_EQUIPMENT_CATEGORIES:
+        cursor.execute(
+            """
+            INSERT INTO equipment_categories (company_id, name, created_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (company_id, name) DO NOTHING
+            """,
+            (company_id, name, created),
+        )
+
+
+def seed_default_technician_functions(cursor, company_id: int) -> None:
+    created = datetime.utcnow().isoformat()
+    for name, day_rate in DEFAULT_TECHNICIAN_FUNCTIONS:
+        cursor.execute(
+            """
+            INSERT INTO technician_functions (company_id, function_name, day_rate, created_at)
+            SELECT %s, %s, %s, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM technician_functions
+                WHERE company_id=%s AND function_name=%s
+            )
+            """,
+            (company_id, name, day_rate, created, company_id, name),
+        )
+
+
+def list_technician_functions(company_id: int) -> list[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            SELECT id, function_name, day_rate, created_at
+            FROM technician_functions
+            WHERE company_id=%s
+            ORDER BY function_name ASC
+            """,
+            (company_id,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def technician_function_by_id(cursor, company_id: int, function_id: int) -> dict | None:
+    cursor.execute(
+        "SELECT id, function_name, day_rate FROM technician_functions WHERE id=%s AND company_id=%s",
+        (function_id, company_id),
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def parse_personnel_lines_from_form(form_data, company_id: int, cursor) -> tuple[list[dict], str | None]:
+    raw = str(form_data.get("personnel_json", "") or "").strip()
+    if not raw:
+        return [], None
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError:
+        return [], "Invalid personnel line data."
+    if not isinstance(entries, list):
+        return [], "Invalid personnel line data."
+    lines: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            function_id = int(entry.get("function_id") or 0)
+            qty = int(entry.get("qty") or 0)
+            days = int(entry.get("days") or 0)
+            day_rate = int(entry.get("day_rate") or 0)
+        except (TypeError, ValueError):
+            return [], "Personnel quantity, days, and rates must be whole numbers."
+        if qty < 1 or days < 1:
+            continue
+        if day_rate < 0:
+            return [], "Personnel day rate cannot be negative."
+        fn = technician_function_by_id(cursor, company_id, function_id)
+        if not fn:
+            return [], "Selected technician function not found."
+        line_total = qty * days * day_rate
+        lines.append(
+            {
+                "line_type": "personnel",
+                "technician_function_id": function_id,
+                "name": fn["function_name"],
+                "qty": qty,
+                "days": days,
+                "unit_price": day_rate,
+                "line_total": line_total,
+            }
+        )
+    return lines, None
+
+
+def list_equipment_movements_for_job(cursor, company_id: int, job_id: int) -> list[dict]:
+    cursor.execute(
+        """
+        SELECT em.*, u.full_name AS processed_by_name, jpi.equipment_name
+        FROM equipment_movements em
+        LEFT JOIN users u ON u.id = em.processed_by_user_id
+        LEFT JOIN job_prep_items jpi ON jpi.id = em.prep_item_id
+        WHERE em.company_id=%s AND em.job_id=%s
+        ORDER BY em.processed_at ASC, em.id ASC
+        """,
+        (company_id, job_id),
+    )
+    return [dict(r) for r in cursor.fetchall()]
+
+
+def prep_item_collection_state(movements: list[dict], prep_item_id: int) -> str:
+    """Return 'out' if last movement is collected, 'in' if returned or none."""
+    relevant = [m for m in movements if int(m.get("prep_item_id") or 0) == prep_item_id]
+    if not relevant:
+        return "none"
+    last = relevant[-1]
+    if str(last.get("movement_type") or "").lower() == "collected":
+        return "out"
+    return "in"
+
+
+def movements_by_job_for_company(cursor, company_id: int) -> dict[int, list[dict]]:
+    cursor.execute(
+        """
+        SELECT em.*, u.full_name AS processed_by_name, jpi.equipment_name
+        FROM equipment_movements em
+        LEFT JOIN users u ON u.id = em.processed_by_user_id
+        LEFT JOIN job_prep_items jpi ON jpi.id = em.prep_item_id
+        WHERE em.company_id=%s
+        ORDER BY em.job_id ASC, em.processed_at ASC, em.id ASC
+        """,
+        (company_id,),
+    )
+    out: dict[int, list[dict]] = {}
+    for row in cursor.fetchall():
+        d = dict(row)
+        jid = int(d["job_id"])
+        out.setdefault(jid, []).append(d)
+    return out
+
+
+def migrate_equipment_categories_for_company(cursor, company_id: int) -> None:
+    seed_default_equipment_categories(cursor, company_id)
+    created = datetime.utcnow().isoformat()
+    cursor.execute(
+        """
+        SELECT DISTINCT TRIM(category) AS cat FROM equipment
+        WHERE company_id=%s AND category IS NOT NULL AND TRIM(category) <> ''
+        """,
+        (company_id,),
+    )
+    for row in cursor.fetchall():
+        cat = str(row["cat"] if isinstance(row, dict) else row[0]).strip()
+        if not cat:
+            continue
+        cursor.execute(
+            """
+            INSERT INTO equipment_categories (company_id, name, created_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (company_id, name) DO NOTHING
+            """,
+            (company_id, cat, created),
+        )
+
+
+def list_equipment_categories(company_id: int) -> list[dict]:
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT id, name, created_at FROM equipment_categories WHERE company_id=%s ORDER BY name ASC",
+            (company_id,),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def equipment_category_names(company_id: int) -> set[str]:
+    return {c["name"] for c in list_equipment_categories(company_id)}
+
+
+def normalize_equipment_category(company_id: int, category: str) -> str:
+    clean = category.strip()
+    if not clean:
+        return ""
+    if clean in equipment_category_names(company_id):
+        return clean
+    return ""
+
+
+def parse_transport_from_form(form_data) -> dict:
+    ttype = str(form_data.get("transport_type", "none") or "none").strip().lower()
+    if ttype not in TRANSPORT_TYPES:
+        ttype = "none"
+
+    def _int_field(key: str, default: int = 0) -> int:
+        try:
+            return max(0, int(str(form_data.get(key, default)).strip() or default))
+        except (TypeError, ValueError):
+            return default
+
+    amount = 0
+    description = ""
+    if ttype == "fixed_fee":
+        amount = _int_field("transport_fixed_amount")
+        description = "Fixed delivery fee"
+    elif ttype == "per_km":
+        distance = _int_field("transport_distance_km")
+        rate = _int_field("transport_rate_per_km")
+        amount = distance * rate
+        description = f"{distance} km @ R{rate}/km"
+    elif ttype == "vehicle_hire":
+        amount = _int_field("transport_day_rate")
+        desc = str(form_data.get("transport_vehicle_description", "")).strip()
+        description = desc or "Vehicle hire"
+        if desc and amount:
+            description = f"{desc} (day rate)"
+    return {
+        "transport_type": ttype,
+        "transport_description": description,
+        "transport_amount": int(amount),
+    }
+
+
+def transport_display_from_row(row: dict | None) -> dict:
+    if not row:
+        return {"transport_type": "none", "transport_description": "", "transport_amount": 0}
+    ttype = str(row.get("transport_type") or "none").strip().lower()
+    if ttype not in TRANSPORT_TYPES:
+        ttype = "none"
+    try:
+        amount = int(row.get("transport_amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    return {
+        "transport_type": ttype,
+        "transport_description": str(row.get("transport_description") or "").strip(),
+        "transport_amount": max(0, amount),
+    }
+
+
+def quote_financials_with_breakdown(qdict: dict, lines: list[dict]) -> dict:
+    fin = quote_financials_from_saved_row(qdict, lines)
+    transport = transport_display_from_row(qdict)
+    equipment_subtotal = sum(int(l.get("line_total", 0) or 0) for l in lines if str(l.get("line_type") or "") not in ("personnel", "function", "technician"))
+    fin["equipment_subtotal"] = equipment_subtotal
+    fin["transport_amount"] = transport["transport_amount"]
+    fin["transport_type"] = transport["transport_type"]
+    fin["transport_description"] = transport["transport_description"]
+    return fin
 
 
 def init_db() -> None:
@@ -220,6 +485,19 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE equipment ADD COLUMN quantity_rented INTEGER NOT NULL DEFAULT 0")
         if not has_column(cursor, "equipment", "category"):
             cursor.execute("ALTER TABLE equipment ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equipment_categories (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                UNIQUE(company_id, name)
+            )
+            """
+        )
         cursor.execute("UPDATE equipment SET quantity=1 WHERE quantity IS NULL OR quantity < 1")
         cursor.execute("UPDATE equipment SET quantity_rented=0 WHERE quantity_rented IS NULL")
         cursor.execute("UPDATE equipment SET quantity_rented=1 WHERE status='rented' AND quantity_rented=0")
@@ -383,6 +661,9 @@ def init_db() -> None:
             ("end_date", "ALTER TABLE quotes ADD COLUMN end_date TEXT"),
             ("special_notes", "ALTER TABLE quotes ADD COLUMN special_notes TEXT"),
             ("quote_terms", "ALTER TABLE quotes ADD COLUMN quote_terms TEXT"),
+            ("transport_type", "ALTER TABLE quotes ADD COLUMN transport_type TEXT NOT NULL DEFAULT 'none'"),
+            ("transport_description", "ALTER TABLE quotes ADD COLUMN transport_description TEXT"),
+            ("transport_amount", "ALTER TABLE quotes ADD COLUMN transport_amount INTEGER NOT NULL DEFAULT 0"),
         ):
             if not has_column(cursor, "quotes", qcol):
                 cursor.execute(qddl)
@@ -425,6 +706,9 @@ def init_db() -> None:
             ("vat_percent", "ALTER TABLE invoices ADD COLUMN vat_percent NUMERIC NOT NULL DEFAULT 15"),
             ("vat_amount", "ALTER TABLE invoices ADD COLUMN vat_amount INTEGER NOT NULL DEFAULT 0"),
             ("grand_total", "ALTER TABLE invoices ADD COLUMN grand_total INTEGER"),
+            ("transport_type", "ALTER TABLE invoices ADD COLUMN transport_type TEXT NOT NULL DEFAULT 'none'"),
+            ("transport_description", "ALTER TABLE invoices ADD COLUMN transport_description TEXT"),
+            ("transport_amount", "ALTER TABLE invoices ADD COLUMN transport_amount INTEGER NOT NULL DEFAULT 0"),
         ):
             if not has_column(cursor, "invoices", icol):
                 cursor.execute(iddl)
@@ -564,6 +848,44 @@ def init_db() -> None:
         if table_exists(cursor, "company_settings") and not has_column(cursor, "company_settings", "company_logo_path"):
             cursor.execute("ALTER TABLE company_settings ADD COLUMN company_logo_path TEXT")
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS technician_functions (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                function_name TEXT NOT NULL,
+                day_rate INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                UNIQUE(company_id, function_name)
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS equipment_movements (
+                id SERIAL PRIMARY KEY,
+                company_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL,
+                prep_item_id INTEGER,
+                equipment_id INTEGER,
+                movement_type TEXT NOT NULL,
+                collected_by_name TEXT,
+                collected_by_contact TEXT,
+                condition_out TEXT,
+                condition_in TEXT,
+                notes TEXT,
+                processed_by_user_id INTEGER NOT NULL,
+                processed_at TEXT NOT NULL,
+                FOREIGN KEY(company_id) REFERENCES companies(id),
+                FOREIGN KEY(job_id) REFERENCES jobs(id),
+                FOREIGN KEY(prep_item_id) REFERENCES job_prep_items(id),
+                FOREIGN KEY(processed_by_user_id) REFERENCES users(id)
+            )
+            """
+        )
+
         if table_exists(cursor, "jobs"):
             cursor.execute(
                 "UPDATE jobs SET status='upcoming' WHERE status IN ('pending', 'confirmed', 'in_progress', 'completed')"
@@ -578,6 +900,12 @@ def init_db() -> None:
                 cursor.execute("UPDATE job_status_log SET old_status=%s WHERE old_status=%s", (new, old))
                 cursor.execute("UPDATE job_status_log SET new_status=%s WHERE new_status=%s", (new, old))
 
+        cursor.execute("SELECT id FROM companies")
+        for co in cursor.fetchall():
+            cid = int(co["id"])
+            migrate_equipment_categories_for_company(cursor, cid)
+            if table_exists(cursor, "technician_functions"):
+                seed_default_technician_functions(cursor, cid)
 
 
 init_db()
@@ -1034,73 +1362,20 @@ def build_invoice_pdf_bytes(
     )
     styles = getSampleStyleSheet()
     story: list = []
-    navy = colors.HexColor("#1a1a2e")
-    grid = colors.HexColor("#d9dce3")
     cid = int(inv.get("company_id") or 0)
-
-    cn = escape(str(settings.get("company_name") or "Company"))
-    left_parts = [f"<b><font size='14'>{cn}</font></b>"]
-    if settings.get("address"):
-        left_parts.append(escape(str(settings["address"]).strip()))
-    if settings.get("email"):
-        left_parts.append(escape(str(settings["email"]).strip()))
-    if settings.get("phone"):
-        left_parts.append(escape(str(settings["phone"]).strip()))
-    left_html = "<br/>".join(left_parts)
-    left_para = Paragraph(left_html, styles["Normal"])
-
-    inv_no = escape(str(inv.get("invoice_number") or ""))
     created_raw = str(inv.get("created_at") or "")
-    created = escape(created_raw[:10] if created_raw else "—")
-    due = escape(str(inv.get("due_date") or "—"))
-    right_html = (
-        f'<para align="right"><b><font size="18" color="#1a1a2e">INVOICE</font></b><br/><br/>'
-        f"<b>No.</b> {inv_no}<br/>"
-        f"<b>Date created</b> {created}<br/>"
-        f"<b>Due date</b> {due}</para>"
-    )
-    right_para = Paragraph(right_html, styles["Normal"])
-
-    logo_flow = pdf_company_logo_flowable(cid) if cid else None
-    if logo_flow:
-        left_inner_rows: list[list] = [[logo_flow, left_para]]
-        left_inner = Table(left_inner_rows, colWidths=[32 * mm, 68 * mm])
-        left_inner.setStyle(
-            TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("ALIGN", (0, 0), (0, 0), "LEFT"),
-                    ("ALIGN", (1, 0), (1, 0), "LEFT"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-                ]
-            )
-        )
-        left_cell = left_inner
-    else:
-        left_cell = left_para
-
-    header_table = Table([[left_cell, right_para]], colWidths=[100 * mm, 69 * mm])
-    header_table.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ("TOPPADDING", (0, 0), (-1, -1), 0),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ]
-        )
-    )
-    story.append(header_table)
-    story.append(Spacer(1, 14))
+    created = created_raw[:10] if created_raw else "—"
+    left_fields = [
+        ("No.", str(inv.get("invoice_number") or "")),
+        ("Date created", created),
+        ("Due date", str(inv.get("due_date") or "—")),
+    ]
+    story.extend(pdf_document_header_flowables("INVOICE", left_fields, settings, cid, styles))
 
     client_name = str(inv.get("client_name") or "—")
     client_prof = client_profile_by_name(cid, client_name) if cid else None
-    for flow in pdf_client_details_flowables(client_name, client_prof, styles):
-        story.append(flow)
+    story.extend(pdf_client_section_flowables(client_name, client_prof, styles))
+
     quote_row = None
     qid = inv.get("quote_id")
     if cid and qid:
@@ -1110,162 +1385,48 @@ def build_invoice_pdf_bytes(
             quote_row = cur.fetchone()
     if quote_row:
         qd = dict(quote_row)
-        for flow in pdf_job_details_flowables(
-            qd.get("job_name"),
-            qd.get("site_location"),
-            qd.get("start_date"),
-            qd.get("end_date"),
-            qd.get("special_notes"),
-            styles,
-        ):
-            story.append(flow)
-    story.append(Spacer(1, 4))
-
-    inv_equip_cell_style = ParagraphStyle(
-        name="InvoicePdfEquipmentCell",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=9,
-        leading=12,
-        alignment=TA_LEFT,
-        wordWrap="CJK",
-        spaceBefore=0,
-        spaceAfter=0,
-    )
-    table_rows: list[list] = [["Equipment", "Qty", "Unit price", "Line total"]]
-    for line in line_items:
-        nm = escape(str(line.get("name", "—")))
-        try:
-            q = int(line.get("qty", 1) or 1)
-        except (TypeError, ValueError):
-            q = 1
-        try:
-            up = int(line.get("unit_price", 0) or 0)
-        except (TypeError, ValueError):
-            up = 0
-        try:
-            lt = int(line.get("line_total", 0) or 0)
-        except (TypeError, ValueError):
-            lt = 0
-        table_rows.append([Paragraph(nm, inv_equip_cell_style), str(q), f"R{up}", f"R{lt}"])
-
-    inv_col_widths = [112 * mm, 14 * mm, 26 * mm, 26 * mm]
-    items_table = Table(table_rows, colWidths=inv_col_widths, repeatRows=1)
-    items_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), navy),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, 0), 9),
-                ("ALIGN", (1, 0), (1, -1), "CENTER"),
-                ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("GRID", (0, 0), (-1, -1), 0.5, grid),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]
+        story.extend(
+            pdf_job_section_flowables(
+                qd.get("job_name"),
+                qd.get("site_location"),
+                qd.get("start_date"),
+                qd.get("end_date"),
+                qd.get("special_notes"),
+                styles,
+            )
         )
-    )
-    story.append(items_table)
-    story.append(Spacer(1, 14))
+
+    story.extend(pdf_equipment_table_flowables(line_items, styles, quote_style=False))
+    transport = transport_display_from_row(inv)
+    story.extend(pdf_transport_section_flowables(transport, styles))
+    story.extend(pdf_personnel_section_flowables(line_items, styles))
 
     fin = invoice_financials_from_row(inv, line_items)
-    red_hex = "#b91c1c"
-    discount_label_style = ParagraphStyle(
-        name="InvoicePdfDiscountLbl",
-        parent=styles["Normal"],
-        textColor=colors.HexColor(red_hex),
-        fontSize=10,
-        alignment=TA_LEFT,
+    transport = transport_display_from_row(inv)
+    fin["transport_amount"] = transport["transport_amount"]
+    fin["transport_type"] = transport["transport_type"]
+    fin["transport_description"] = transport["transport_description"]
+    fin["equipment_subtotal"] = sum(
+        int(l.get("line_total", 0) or 0)
+        for l in line_items
+        if str(l.get("line_type") or "").lower() not in ("personnel", "function", "technician")
     )
-    discount_amt_style = ParagraphStyle(
-        name="InvoicePdfDiscountAmt",
-        parent=styles["Normal"],
-        textColor=colors.HexColor(red_hex),
-        fontSize=10,
-        alignment=TA_RIGHT,
-    )
-    inv_summary_amt_style = ParagraphStyle(
-        name="InvoicePdfSummaryAmt",
-        parent=styles["Normal"],
-        fontSize=10,
-        alignment=TA_RIGHT,
-    )
-    grand_label_style = ParagraphStyle(
-        name="InvoicePdfGrandLbl",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        alignment=TA_LEFT,
-    )
-    grand_amt_style = ParagraphStyle(
-        name="InvoicePdfGrandAmt",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        alignment=TA_RIGHT,
+    inv_col_widths = [112 * mm, 14 * mm, 26 * mm, 26 * mm]
+    story.extend(
+        pdf_totals_table_flowables(
+            fin,
+            styles,
+            line_items_width=sum(inv_col_widths),
+            amount_paid=amount_paid,
+            remaining=remaining,
+        )
     )
 
-    summary_rows: list[list] = [
-        ["Subtotal", Paragraph(escape(f"R{int(fin['subtotal'])}"), inv_summary_amt_style)],
-    ]
-    if int(fin["discount_amount"] or 0) > 0:
-        dp = fin["discount_percent"]
-        summary_rows.append(
-            [
-                Paragraph(escape(f"Discount ({dp:g}%)"), discount_label_style),
-                Paragraph(escape(f"R{int(fin['discount_amount'])}"), discount_amt_style),
-            ]
-        )
-    if fin.get("vat_enabled") and int(fin.get("vat_amount") or 0) > 0:
-        vp = fin["vat_percent"]
-        summary_rows.append(
-            [
-                Paragraph(escape(f"VAT ({vp:g}%)"), styles["Normal"]),
-                Paragraph(escape(f"R{int(fin['vat_amount'])}"), inv_summary_amt_style),
-            ]
-        )
-    summary_rows.append(
-        [
-            Paragraph("Grand total", grand_label_style),
-            Paragraph(escape(f"R{int(fin['grand_total'])}"), grand_amt_style),
-        ]
-    )
-    summary_rows.append(["Amount paid", Paragraph(escape(f"R{amount_paid}"), inv_summary_amt_style)])
-    summary_rows.append(["Remaining balance", Paragraph(escape(f"R{remaining}"), inv_summary_amt_style)])
-
-    inv_line_items_width = sum(inv_col_widths)
-    totals_amt_col_w = 52 * mm
-    totals_label_col_w = inv_line_items_width - totals_amt_col_w
-    summary_tbl = Table(summary_rows, colWidths=[totals_label_col_w, totals_amt_col_w])
-    summary_tbl.setStyle(
-        TableStyle(
-            [
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 5),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("LINEABOVE", (0, 0), (-1, 0), 0.75, colors.HexColor("#c2c8d3")),
-                ("LINEBELOW", (0, -1), (-1, -1), 0.5, grid),
-            ]
-        )
-    )
-    story.append(summary_tbl)
-    story.append(Spacer(1, 16))
-    inv_terms = ""
-    if quote_row:
+    inv_terms = str(inv.get("quote_terms") or "").strip()
+    if not inv_terms and quote_row:
         inv_terms = str(dict(quote_row).get("quote_terms") or "").strip()
-    for flow in pdf_terms_flowables(inv_terms, styles):
-        story.append(flow)
-    for flow in pdf_banking_detail_flowables(settings, styles):
-        story.append(flow)
-    story.append(Spacer(1, 8))
+    story.extend(pdf_terms_section_flowables(inv_terms, styles))
+    story.extend(pdf_banking_section_flowables(settings, styles))
 
     ps = (payment_status or "unpaid").lower()
     if ps == "paid":
@@ -1276,10 +1437,11 @@ def build_invoice_pdf_bytes(
         status_label, color_hex = "UNPAID", "#b91c1c"
     story.append(
         Paragraph(
-            f'<para align="center"><b><font size="16" color="{color_hex}">Payment status: {status_label}</font></b></para>',
+            f'<para align="center"><b><font size="14" color="{color_hex}">Payment status: {status_label}</font></b></para>',
             styles["Normal"],
         )
     )
+    story.extend(pdf_thank_you_footer_flowables(settings, styles))
 
     doc.build(story)
     return buf.getvalue()
@@ -1537,12 +1699,401 @@ def company_banking_configured(settings: dict) -> bool:
     return bool((settings.get("bank_name") or "").strip() and (settings.get("bank_account_number") or "").strip())
 
 
-def pdf_banking_detail_flowables(settings: dict, styles) -> list:
-    """Banking block for quote/invoice PDFs when bank name and account number are set."""
+PDF_NAVY = colors.HexColor(PDF_NAVY_HEX)
+PDF_GRID = colors.HexColor("#d9dce3")
+
+
+def pdf_section_divider() -> list:
+    line_table = Table([[""]], colWidths=[169 * mm], rowHeights=[2])
+    line_table.setStyle(
+        TableStyle(
+            [
+                ("LINEABOVE", (0, 0), (-1, -1), 0.75, PDF_GRID),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    return [Spacer(1, 8), line_table, Spacer(1, 8)]
+
+
+def pdf_section_heading(label: str, styles) -> Paragraph:
+    return Paragraph(
+        f'<font color="{PDF_NAVY_HEX}"><b>{escape(label)}</b></font>',
+        ParagraphStyle(
+            name=f"PdfHeading_{label[:12]}",
+            parent=styles["Normal"],
+            fontSize=10,
+            fontName="Helvetica-Bold",
+            spaceAfter=6,
+            spaceBefore=0,
+        ),
+    )
+
+
+def pdf_company_details_paragraph(settings: dict, styles) -> Paragraph:
+    cn = escape(str(settings.get("company_name") or "Company"))
+    parts = [f"<b><font size='12'>{cn}</font></b>"]
+    if settings.get("tagline"):
+        parts.append(escape(str(settings["tagline"]).strip()))
+    if settings.get("email"):
+        parts.append(f"Email: {escape(str(settings['email']).strip())}")
+    if settings.get("phone"):
+        parts.append(f"Phone: {escape(str(settings['phone']).strip())}")
+    if settings.get("address"):
+        parts.append(f"Address: {escape(str(settings['address']).strip())}")
+    if settings.get("vat_number"):
+        parts.append(f"VAT/Reg: {escape(str(settings['vat_number']).strip())}")
+    return Paragraph("<br/>".join(parts), styles["Normal"])
+
+
+def pdf_document_header_flowables(
+    doc_title: str,
+    left_fields: list[tuple[str, str]],
+    settings: dict,
+    company_id: int,
+    styles,
+) -> list:
+    """Quote/invoice header: document info left, logo and company details right."""
+    left_lines = [f'<b><font size="16" color="{PDF_NAVY_HEX}">{escape(doc_title)}</font></b>']
+    for label, value in left_fields:
+        left_lines.append(f"<b>{escape(label)}</b> {escape(str(value or '—'))}")
+    left_para = Paragraph("<br/>".join(left_lines), styles["Normal"])
+    right_parts: list = []
+    logo_flow = pdf_company_logo_flowable(company_id) if company_id else None
+    company_para = pdf_company_details_paragraph(settings, styles)
+    if logo_flow:
+        logo_cell = Table([[logo_flow]], colWidths=[84 * mm])
+        logo_cell.setStyle(
+            TableStyle(
+                [
+                    ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        right_parts.append(logo_cell)
+    right_parts.append(company_para)
+    if len(right_parts) == 1:
+        right_cell: object = right_parts[0]
+    else:
+        right_cell = Table([[p] for p in right_parts], colWidths=[84 * mm])
+        right_cell.setStyle(
+            TableStyle(
+                [
+                    ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ]
+            )
+        )
+    header = Table([[left_para, right_cell]], colWidths=[85 * mm, 84 * mm])
+    header.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (0, 0), (0, 0), "LEFT"),
+                ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    return [header, Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_client_section_flowables(client_name: str, profile: dict | None, styles) -> list:
+    parts = [f"<b>{escape(str(client_name or '').strip() or '—')}</b>"]
+    if profile:
+        for label, key in (
+            ("Contact Person", "contact_person"),
+            ("Phone", "phone"),
+            ("Email", "email"),
+            ("Address", "address"),
+            ("VAT Number", "vat_number"),
+        ):
+            val = str(profile.get(key) or "").strip()
+            if val:
+                parts.append(f"{label}: {escape(val)}")
+    return [pdf_section_heading("CLIENT", styles), Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_job_section_flowables(
+    job_name: str | None,
+    site_location: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    special_notes: str | None,
+    styles,
+) -> list:
+    jn = str(job_name or "").strip()
+    sl = str(site_location or "").strip()
+    sd = str(start_date or "").strip()
+    ed = str(end_date or "").strip()
+    sn = str(special_notes or "").strip()
+    if not any([jn, sl, sd, ed, sn]):
+        return []
+    parts: list[str] = []
+    if jn:
+        parts.append(f"Job Name: {escape(jn)}")
+    if sl:
+        parts.append(f"Site / Location: {escape(sl)}")
+    if sd:
+        parts.append(f"Start Date: {escape(sd)}")
+    if ed:
+        parts.append(f"End Date: {escape(ed)}")
+    if sn:
+        parts.append(f"Notes: {escape(sn)}")
+    return [pdf_section_heading("JOB DETAILS", styles), Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_personnel_lines(lines: list) -> list[dict]:
+    out = []
+    for line in lines:
+        if str(line.get("line_type") or "").lower() in ("personnel", "function", "technician"):
+            out.append(line)
+    return out
+
+
+def pdf_equipment_lines_for_table(lines: list, quote_style: bool) -> list[list]:
+    personnel_types = {"personnel", "function", "technician"}
+    rows: list[list] = []
+    for line in lines:
+        if str(line.get("line_type") or "").lower() in personnel_types:
+            continue
+        if quote_style and line.get("equipment_id") is None and quote_line_is_sub_rental(line) and not show_sub_rental_on_client_pdf(line):
+            continue
+        name = str(line.get("name", "—"))
+        try:
+            qty = int(line.get("qty", 1) or 1)
+        except (TypeError, ValueError):
+            qty = 1
+        try:
+            unit_price = int(line.get("unit_price", 0) or 0)
+        except (TypeError, ValueError):
+            unit_price = 0
+        try:
+            line_total = int(line.get("line_total", 0) or 0)
+        except (TypeError, ValueError):
+            line_total = 0
+        if quote_style:
+            try:
+                days = int(line.get("days", 1) or 1)
+            except (TypeError, ValueError):
+                days = 1
+            rows.append([str(qty), name, f"R{unit_price}", str(days), f"R{line_total}"])
+        else:
+            rows.append([name, str(qty), f"R{unit_price}", f"R{line_total}"])
+    return rows
+
+
+def pdf_equipment_table_flowables(lines: list, styles, *, quote_style: bool = False) -> list:
+    cell_style = ParagraphStyle(
+        name="PdfEquipCell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        alignment=TA_LEFT,
+        wordWrap="CJK",
+    )
+    body_rows = pdf_equipment_lines_for_table(lines, quote_style)
+    if quote_style:
+        headers = ["Qty", "Equipment / Description", "Unit Price", "Days", "Line Total"]
+        col_widths = [12 * mm, 104 * mm, 26 * mm, 12 * mm, 24 * mm]
+        name_col = 1
+    else:
+        headers = ["Equipment", "Qty", "Unit price", "Line total"]
+        col_widths = [112 * mm, 14 * mm, 26 * mm, 26 * mm]
+        name_col = 0
+    table_rows: list[list] = [headers]
+    if not body_rows:
+        empty = Paragraph(escape("No equipment line items."), cell_style)
+        if quote_style:
+            table_rows.append(["—", empty, "", "", ""])
+        else:
+            table_rows.append([empty, "—", "R0", "R0"])
+    else:
+        for br in body_rows:
+            if quote_style:
+                table_rows.append(
+                    [br[0], Paragraph(escape(str(br[1])), cell_style), br[2], br[3], br[4]]
+                )
+            else:
+                table_rows.append(
+                    [Paragraph(escape(str(br[0])), cell_style), br[1], br[2], br[3]]
+                )
+    items_table = Table(table_rows, colWidths=col_widths, repeatRows=1)
+    tbl_style: list = [
+        ("BACKGROUND", (0, 0), (-1, 0), PDF_NAVY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 9),
+        ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
+        ("ALIGN", (name_col, 0), (name_col, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("GRID", (0, 0), (-1, -1), 0.5, PDF_GRID),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]
+    if quote_style:
+        tbl_style.insert(5, ("ALIGN", (0, 0), (0, -1), "CENTER"))
+    else:
+        tbl_style.insert(5, ("ALIGN", (1, 0), (1, -1), "CENTER"))
+    items_table.setStyle(TableStyle(tbl_style))
+    return [pdf_section_heading("EQUIPMENT", styles), items_table, Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_transport_section_flowables(transport: dict, styles) -> list:
+    if str(transport.get("transport_type") or "none") == "none":
+        return []
+    try:
+        amount = int(transport.get("transport_amount") or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    if amount <= 0:
+        return []
+    desc = str(transport.get("transport_description") or "").strip()
+    parts = [f"<b>Transport &amp; Delivery — R{amount}</b>"]
+    if desc:
+        parts.append(escape(desc))
+    return [pdf_section_heading("TRANSPORT & DELIVERY", styles), Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_personnel_section_flowables(lines: list, styles) -> list:
+    personnel = pdf_personnel_lines(lines)
+    if not personnel:
+        return []
+    cell_style = ParagraphStyle(
+        name="PdfPersonnelCell",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        alignment=TA_LEFT,
+        wordWrap="CJK",
+    )
+    # Match EQUIPMENT table full width (178mm): Function widest, Qty/Days small, Rate/Line total medium
+    col_widths = [104 * mm, 12 * mm, 12 * mm, 26 * mm, 24 * mm]
+    rows = [["Function", "Qty", "Days", "Rate", "Line total"]]
+    for line in personnel:
+        try:
+            days = int(line.get("days", 1) or 1)
+        except (TypeError, ValueError):
+            days = 1
+        rows.append(
+            [
+                Paragraph(escape(str(line.get("name") or line.get("role") or "—")), cell_style),
+                str(line.get("qty", 1)),
+                str(days),
+                f"R{int(line.get('unit_price', 0) or 0)}",
+                f"R{int(line.get('line_total', 0) or 0)}",
+            ]
+        )
+    tbl = Table(rows, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), PDF_NAVY),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 9),
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
+                ("ALIGN", (1, 0), (1, -1), "CENTER"),
+                ("ALIGN", (2, 0), (2, -1), "CENTER"),
+                ("ALIGN", (3, 0), (-1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("GRID", (0, 0), (-1, -1), 0.5, PDF_GRID),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    return [pdf_section_heading("PERSONNEL", styles), tbl, Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_totals_table_flowables(
+    fin: dict,
+    styles,
+    *,
+    line_items_width: float,
+    amount_paid: int | None = None,
+    remaining: int | None = None,
+) -> list:
+    red_hex = "#b91c1c"
+    amt_style = ParagraphStyle(name="PdfTotAmt", parent=styles["Normal"], fontSize=10, alignment=TA_RIGHT)
+    disc_lbl = ParagraphStyle(name="PdfDiscLbl", parent=styles["Normal"], textColor=colors.HexColor(red_hex), fontSize=10)
+    disc_amt = ParagraphStyle(name="PdfDiscAmt", parent=styles["Normal"], textColor=colors.HexColor(red_hex), fontSize=10, alignment=TA_RIGHT)
+    grand_lbl = ParagraphStyle(name="PdfGrandLbl", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=10)
+    grand_amt = ParagraphStyle(name="PdfGrandAmt", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=10, alignment=TA_RIGHT)
+
+    equipment_sub = fin.get("equipment_subtotal")
+    transport_amt = int(fin.get("transport_amount") or 0)
+    summary_rows: list[list] = []
+    if transport_amt > 0 and equipment_sub is not None:
+        summary_rows.append(["Equipment subtotal", Paragraph(escape(f"R{int(equipment_sub)}"), amt_style)])
+        summary_rows.append(
+            ["Transport & Delivery", Paragraph(escape(f"R{transport_amt}"), amt_style)]
+        )
+    summary_rows.append(["Subtotal", Paragraph(escape(f"R{int(fin['subtotal'])}"), amt_style)])
+    if int(fin.get("discount_amount") or 0) > 0:
+        dp = fin["discount_percent"]
+        summary_rows.append(
+            [
+                Paragraph(escape(f"Discount ({dp:g}%)"), disc_lbl),
+                Paragraph(escape(f"R{int(fin['discount_amount'])}"), disc_amt),
+            ]
+        )
+    if fin.get("vat_enabled") and int(fin.get("vat_amount") or 0) > 0:
+        vp = fin["vat_percent"]
+        summary_rows.append(
+            [
+                Paragraph(escape(f"VAT ({vp:g}%)"), styles["Normal"]),
+                Paragraph(escape(f"R{int(fin['vat_amount'])}"), amt_style),
+            ]
+        )
+    summary_rows.append(
+        [
+            Paragraph("Grand total", grand_lbl),
+            Paragraph(escape(f"R{int(fin['grand_total'])}"), grand_amt),
+        ]
+    )
+    if amount_paid is not None:
+        summary_rows.append(["Amount paid", Paragraph(escape(f"R{amount_paid}"), amt_style)])
+    if remaining is not None:
+        summary_rows.append(["Remaining balance", Paragraph(escape(f"R{remaining}"), amt_style)])
+
+    amt_col_w = 52 * mm
+    label_col_w = line_items_width - amt_col_w
+    summary_tbl = Table(summary_rows, colWidths=[label_col_w, amt_col_w])
+    summary_tbl.setStyle(
+        TableStyle(
+            [
+                ("ALIGN", (0, 0), (0, -1), "LEFT"),
+                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ("LINEABOVE", (0, 0), (-1, 0), 0.75, PDF_GRID),
+            ]
+        )
+    )
+    return [pdf_section_heading("TOTALS", styles), summary_tbl, Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_banking_section_flowables(settings: dict, styles) -> list:
     if not company_banking_configured(settings):
         return []
     parts = [
-        "<b>Banking Details</b>",
         f"Bank: {escape(str(settings['bank_name']).strip())}",
         f"Account Holder: {escape(str(settings.get('bank_account_holder') or '').strip())}",
         f"Account Number: {escape(str(settings['bank_account_number']).strip())}",
@@ -1552,7 +2103,32 @@ def pdf_banking_detail_flowables(settings: dict, styles) -> list:
     ref = str(settings.get("bank_reference") or "").strip()
     if ref:
         parts.append(f"Reference: {escape(ref)}")
-    return [Spacer(1, 10), Paragraph("<br/>".join(parts), styles["Normal"])]
+    return [pdf_section_heading("BANKING DETAILS", styles), Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_terms_section_flowables(terms: str | None, styles) -> list:
+    text = str(terms or "").strip()
+    if not text:
+        return []
+    body = escape(text).replace("\n", "<br/>")
+    return [pdf_section_heading("TERMS & CONDITIONS", styles), Paragraph(body, styles["Normal"]), Spacer(1, 6)] + pdf_section_divider()
+
+
+def pdf_thank_you_footer_flowables(settings: dict, styles) -> list:
+    footer = str(settings.get("quote_footer") or "").strip()
+    if not footer:
+        footer = "Thank you for your business."
+    return [
+        Spacer(1, 10),
+        Paragraph(
+            f'<para align="center"><i>{escape(footer)}</i></para>',
+            styles["Italic"],
+        ),
+    ]
+
+
+def pdf_banking_detail_flowables(settings: dict, styles) -> list:
+    return pdf_banking_section_flowables(settings, styles)
 
 
 def client_row_to_dict(row: dict | None) -> dict | None:
@@ -1593,19 +2169,7 @@ def client_profile_by_id(company_id: int, client_id: int) -> dict | None:
     
     
 def pdf_client_details_flowables(client_name: str, profile: dict | None, styles) -> list:
-    parts = ["<b>Client</b>", f"<b>{escape(str(client_name or '').strip() or '—')}</b>"]
-    if profile:
-        for label, key in (
-            ("Contact Person", "contact_person"),
-            ("Phone", "phone"),
-            ("Email", "email"),
-            ("Address", "address"),
-            ("VAT Number", "vat_number"),
-        ):
-            val = str(profile.get(key) or "").strip()
-            if val:
-                parts.append(f"{label}: {escape(val)}")
-    return [Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 8)]
+    return pdf_client_section_flowables(client_name, profile, styles)
 
 
 def pdf_job_details_flowables(
@@ -1616,33 +2180,11 @@ def pdf_job_details_flowables(
     special_notes: str | None,
     styles,
 ) -> list:
-    jn = str(job_name or "").strip()
-    sl = str(site_location or "").strip()
-    sd = str(start_date or "").strip()
-    ed = str(end_date or "").strip()
-    sn = str(special_notes or "").strip()
-    if not any([jn, sl, sd, ed, sn]):
-        return []
-    parts = ["<b>Job Details</b>"]
-    if jn:
-        parts.append(f"Job Name: {escape(jn)}")
-    if sl:
-        parts.append(f"Site / Location: {escape(sl)}")
-    if sd:
-        parts.append(f"Start Date: {escape(sd)}")
-    if ed:
-        parts.append(f"End Date: {escape(ed)}")
-    if sn:
-        parts.append(f"Notes: {escape(sn)}")
-    return [Paragraph("<br/>".join(parts), styles["Normal"]), Spacer(1, 8)]
+    return pdf_job_section_flowables(job_name, site_location, start_date, end_date, special_notes, styles)
 
 
 def pdf_terms_flowables(terms: str | None, styles) -> list:
-    text = str(terms or "").strip()
-    if not text:
-        return []
-    body = escape(text).replace("\n", "<br/>")
-    return [Spacer(1, 8), Paragraph(f"<b>Terms and Conditions</b><br/>{body}", styles["Normal"])]
+    return pdf_terms_section_flowables(terms, styles)
 
 
 def quote_meta_from_row(qdict: dict | None, company_id: int, client_name: str) -> dict:
@@ -1664,7 +2206,7 @@ def company_static_logo_path(company_id: int) -> Path:
 
 def quote_financials_from_saved_row(qdict: dict, lines: list[dict]) -> dict[str, int | float | bool]:
     if qdict.get("subtotal") is not None:
-        return {
+        fin = {
             "subtotal": int(qdict["subtotal"]),
             "discount_percent": float(qdict.get("discount_percent") or 0),
             "discount_amount": int(qdict.get("discount_amount") or 0),
@@ -1673,25 +2215,19 @@ def quote_financials_from_saved_row(qdict: dict, lines: list[dict]) -> dict[str,
             "vat_amount": int(qdict.get("vat_amount") or 0),
             "grand_total": int(qdict.get("grand_total") or qdict.get("total") or 0),
         }
-    st = invoice_line_subtotal(lines)
-    return compute_financial_totals(st, 0.0, False, 15.0)
-    """Whole-currency totals: discount and VAT applied server-side."""
-    st = max(0, int(subtotal))
-    dp = max(0.0, min(100.0, float(discount_percent)))
-    discount_amount = int(round(st * dp / 100.0))
-    after_discount = max(0, st - discount_amount)
-    vp = max(0.0, float(vat_percent))
-    vat_amount = int(round(after_discount * vp / 100.0)) if vat_enabled else 0
-    grand_total = after_discount + vat_amount
-    return {
-        "subtotal": st,
-        "discount_percent": dp,
-        "discount_amount": discount_amount,
-        "vat_enabled": bool(vat_enabled),
-        "vat_percent": vp,
-        "vat_amount": vat_amount,
-        "grand_total": grand_total,
-    }
+    else:
+        st = invoice_line_subtotal(lines) + transport_display_from_row(qdict)["transport_amount"]
+        fin = compute_financial_totals(st, 0.0, False, 15.0)
+    transport = transport_display_from_row(qdict)
+    fin["equipment_subtotal"] = sum(
+        int(l.get("line_total", 0) or 0)
+        for l in lines
+        if str(l.get("line_type") or "").lower() not in ("personnel", "function", "technician")
+    )
+    fin["transport_amount"] = transport["transport_amount"]
+    fin["transport_type"] = transport["transport_type"]
+    fin["transport_description"] = transport["transport_description"]
+    return fin
 
 
 def invoice_financials_from_row(inv: dict, line_items: list[dict]) -> dict[str, int | float | bool]:
@@ -1736,8 +2272,8 @@ def pdf_company_logo_flowable(company_id: int) -> RLImage | None:
         iw, ih = ir.getSize()
         if iw <= 0 or ih <= 0:
             return None
-        max_h_pt = 80.0
-        max_w_pt = 160.0
+        max_h_pt = 120.0
+        max_w_pt = 200.0
         scale = min(max_w_pt / float(iw), max_h_pt / float(ih), 1.0)
         dw = iw * scale
         dh = ih * scale
@@ -1828,6 +2364,8 @@ def register_company(company_name: str = Form(...), full_name: str = Form(...), 
                 """,
                 ("Professional Equipment Rentals", clean_email, company_id),
             )
+            seed_default_equipment_categories(cursor, company_id)
+            seed_default_technician_functions(cursor, company_id)
         except psycopg2.IntegrityError:
             conn.rollback()
             return RedirectResponse(url="/register?error=Company%20or%20email%20already%20exists", status_code=303)
@@ -2024,7 +2562,7 @@ def home(request: Request):
                 "items": items,
                 "today": today,
                 "current_user": user,
-                "equipment_categories": EQUIPMENT_CATEGORIES,
+                "equipment_categories": [c["name"] for c in list_equipment_categories(user["company_id"])],
                 "show_onboarding": show_onboarding,
                 "total_count": total_count,
                 "available_count": available_count,
@@ -2170,8 +2708,89 @@ def settings_page(request: Request):
             "has_logo": has_logo,
             "company_id": user["company_id"],
             "current_user": user,
+            "equipment_categories": list_equipment_categories(user["company_id"]),
+            "technician_functions": list_technician_functions(user["company_id"]),
         },
     )
+
+
+@app.post("/settings/technician-functions/add")
+async def settings_technician_function_add(
+    request: Request, function_name: str = Form(...), day_rate: str = Form(default="0")
+):
+    user, response = get_current_user(request, allowed_roles={"admin"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", "/settings", user)
+    name = function_name.strip()
+    if not name:
+        return RedirectResponse(url="/settings?error=Function%20name%20is%20required", status_code=303)
+    try:
+        rate = max(0, int(str(day_rate).strip() or 0))
+    except ValueError:
+        return RedirectResponse(url="/settings?error=Day%20rate%20must%20be%20a%20whole%20number", status_code=303)
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute(
+                """
+                INSERT INTO technician_functions (company_id, function_name, day_rate, created_at)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (user["company_id"], name, rate, datetime.utcnow().isoformat()),
+            )
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            return RedirectResponse(url="/settings?error=Function%20already%20exists", status_code=303)
+        return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+
+@app.post("/settings/technician-functions/{function_id}/edit")
+async def settings_technician_function_edit(
+    request: Request, function_id: int, function_name: str = Form(...), day_rate: str = Form(...)
+):
+    user, response = get_current_user(request, allowed_roles={"admin"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", "/settings", user)
+    name = function_name.strip()
+    if not name:
+        return RedirectResponse(url="/settings?error=Function%20name%20is%20required", status_code=303)
+    try:
+        rate = max(0, int(str(day_rate).strip() or 0))
+    except ValueError:
+        return RedirectResponse(url="/settings?error=Day%20rate%20must%20be%20a%20whole%20number", status_code=303)
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            """
+            UPDATE technician_functions
+            SET function_name=%s, day_rate=%s
+            WHERE id=%s AND company_id=%s
+            """,
+            (name, rate, function_id, user["company_id"]),
+        )
+        if cursor.rowcount < 1:
+            return RedirectResponse(url="/settings?error=Function%20not%20found", status_code=303)
+        return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+
+@app.post("/settings/technician-functions/{function_id}/delete")
+async def settings_technician_function_delete(request: Request, function_id: int):
+    user, response = get_current_user(request, allowed_roles={"admin"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", "/settings", user)
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "DELETE FROM technician_functions WHERE id=%s AND company_id=%s",
+            (function_id, user["company_id"]),
+        )
+        return RedirectResponse(url="/settings?saved=1", status_code=303)
 
 
 @app.post("/settings")
@@ -2254,6 +2873,45 @@ async def update_settings(request: Request):
             (company_name, tagline, email, phone, address, vat_number, quote_footer, user["company_id"]),
         )
         return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+
+@app.post("/settings/categories/add")
+async def settings_category_add(request: Request, category_name: str = Form(...)):
+    user, response = get_current_user(request, allowed_roles={"admin"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", "/settings", user)
+    name = category_name.strip()
+    if not name:
+        return RedirectResponse(url="/settings?error=Category%20name%20is%20required", status_code=303)
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            cursor.execute(
+                "INSERT INTO equipment_categories (company_id, name, created_at) VALUES (%s, %s, %s)",
+                (user["company_id"], name, datetime.utcnow().isoformat()),
+            )
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            return RedirectResponse(url="/settings?error=Category%20already%20exists", status_code=303)
+    return RedirectResponse(url="/settings?saved=1", status_code=303)
+
+
+@app.post("/settings/categories/{category_id}/delete")
+async def settings_category_delete(request: Request, category_id: int):
+    user, response = get_current_user(request, allowed_roles={"admin"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", "/settings", user)
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "DELETE FROM equipment_categories WHERE id=%s AND company_id=%s",
+            (category_id, user["company_id"]),
+        )
+    return RedirectResponse(url="/settings?saved=1", status_code=303)
     
     
 @app.get("/billing", response_class=HTMLResponse)
@@ -2411,13 +3069,16 @@ async def quote_approve(request: Request, quote_id: int):
             due_date = (datetime.utcnow().date() + timedelta(days=30)).isoformat()
             created = datetime.utcnow().isoformat()
             fin_inv = quote_financials_from_saved_row(dict(quote_row), lines)
+            qd = dict(quote_row)
+            tr = transport_display_from_row(qd)
             cursor.execute(
                 """
                 INSERT INTO invoices (
                     company_id, invoice_number, quote_id, client_name, line_items_json, total, created_at, due_date, payment_status, amount_paid,
-                    subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total
+                    subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total,
+                    transport_type, transport_description, transport_amount
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'unpaid', 0, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'unpaid', 0, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -2436,6 +3097,9 @@ async def quote_approve(request: Request, quote_id: int):
                     float(fin_inv["vat_percent"]),
                     int(fin_inv["vat_amount"]),
                     int(fin_inv["grand_total"]),
+                    tr["transport_type"],
+                    tr["transport_description"] or None,
+                    tr["transport_amount"],
                 ),
             )
             invoice_id = cursor.fetchone()["id"]
@@ -2543,6 +3207,7 @@ def jobs_page(request: Request):
             (user["company_id"],),
         )
         jobs = cursor.fetchall()
+        movements_by_job = movements_by_job_for_company(cursor, user["company_id"])
         return templates.TemplateResponse(
             request=request,
             name="jobs.html",
@@ -2551,6 +3216,7 @@ def jobs_page(request: Request):
                 "jobs": jobs,
                 "current_user": user,
                 "job_statuses": ["upcoming", "active", "done"],
+                "movements_by_job": movements_by_job,
             },
         )
     
@@ -2601,6 +3267,11 @@ def warehouse_job_prep(request: Request, job_id: int):
             (job_id, user["company_id"]),
         )
         prep_items = cursor.fetchall()
+        movements = list_equipment_movements_for_job(cursor, user["company_id"], job_id)
+        prep_states: dict[int, str] = {}
+        for pi in prep_items:
+            prep_states[int(pi["id"])] = prep_item_collection_state(movements, int(pi["id"]))
+        show_sign_sections = job["status"] in ("upcoming", "active")
         back_url = "/warehouse" if user["role"] == "warehouse" else "/jobs"
         return templates.TemplateResponse(
             request=request,
@@ -2609,6 +3280,11 @@ def warehouse_job_prep(request: Request, job_id: int):
                 "title": f"Prep — Job #{job_id}",
                 "job": job,
                 "prep_items": prep_items,
+                "prep_states": prep_states,
+                "movements": movements,
+                "show_sign_sections": show_sign_sections,
+                "conditions_out": sorted(EQUIPMENT_CONDITIONS_OUT),
+                "conditions_in": sorted(EQUIPMENT_CONDITIONS_IN),
                 "current_user": user,
                 "back_url": back_url,
             },
@@ -2731,6 +3407,140 @@ async def warehouse_prep_received_toggle(request: Request, job_id: int, prep_ite
             (new_val, prep_item_id, job_id, user["company_id"]),
         )
         return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+
+
+@app.post("/warehouse/job/{job_id}/prep/{prep_item_id}/sign-out")
+async def warehouse_equipment_sign_out(request: Request, job_id: int, prep_item_id: int):
+    user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
+    form = await request.form()
+    collected_by = str(form.get("collected_by_name", "")).strip()
+    if not collected_by:
+        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Collected%20by%20name%20is%20required", status_code=303)
+    contact = str(form.get("collected_by_contact", "")).strip()
+    condition_out = str(form.get("condition_out", "")).strip()
+    if condition_out not in EQUIPMENT_CONDITIONS_OUT:
+        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20condition", status_code=303)
+    notes = str(form.get("notes", "")).strip()
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT status FROM jobs WHERE id=%s AND company_id=%s",
+            (job_id, user["company_id"]),
+        )
+        job = cursor.fetchone()
+        if not job or job["status"] not in ("upcoming", "active"):
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Sign-out%20not%20available%20for%20this%20job%20status", status_code=303)
+        cursor.execute(
+            """
+            SELECT id, equipment_id, equipment_name, line_type
+            FROM job_prep_items
+            WHERE id=%s AND job_id=%s AND company_id=%s
+            """,
+            (prep_item_id, job_id, user["company_id"]),
+        )
+        prep = cursor.fetchone()
+        if not prep or (prep.get("line_type") or "owned") != "owned":
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Item%20not%20found", status_code=303)
+        movements = list_equipment_movements_for_job(cursor, user["company_id"], job_id)
+        if prep_item_collection_state(movements, prep_item_id) == "out":
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Equipment%20already%20signed%20out", status_code=303)
+        now = datetime.utcnow().isoformat()
+        cursor.execute(
+            """
+            INSERT INTO equipment_movements
+            (company_id, job_id, prep_item_id, equipment_id, movement_type,
+             collected_by_name, collected_by_contact, condition_out, notes,
+             processed_by_user_id, processed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user["company_id"],
+                job_id,
+                prep_item_id,
+                prep.get("equipment_id"),
+                "collected",
+                collected_by,
+                contact,
+                condition_out,
+                notes,
+                user["user_id"],
+                now,
+            ),
+        )
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
+
+
+@app.post("/warehouse/job/{job_id}/prep/{prep_item_id}/sign-in")
+async def warehouse_equipment_sign_in(request: Request, job_id: int, prep_item_id: int):
+    user, response = get_current_user(request, allowed_roles={"warehouse", "admin", "management"})
+    if response:
+        return response
+    if not await validate_csrf(request, user):
+        return render_message(request, "Security Error", "Invalid security token.", f"/warehouse/job/{job_id}", user)
+    form = await request.form()
+    returned_by = str(form.get("returned_by_name", "")).strip()
+    if not returned_by:
+        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Returned%20by%20name%20is%20required", status_code=303)
+    condition_in = str(form.get("condition_in", "")).strip()
+    if condition_in not in EQUIPMENT_CONDITIONS_IN:
+        return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Invalid%20return%20condition", status_code=303)
+    damage_notes = str(form.get("damage_notes", "")).strip()
+    if condition_in in ("Damaged", "Missing items") and not damage_notes:
+        return RedirectResponse(
+            url=f"/warehouse/job/{job_id}?error=Damage%20notes%20required%20for%20damaged%20or%20missing%20items",
+            status_code=303,
+        )
+    notes = damage_notes
+    with get_db() as conn:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute(
+            "SELECT status FROM jobs WHERE id=%s AND company_id=%s",
+            (job_id, user["company_id"]),
+        )
+        job = cursor.fetchone()
+        if not job:
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Job%20not%20found", status_code=303)
+        cursor.execute(
+            """
+            SELECT id, equipment_id, line_type
+            FROM job_prep_items
+            WHERE id=%s AND job_id=%s AND company_id=%s
+            """,
+            (prep_item_id, job_id, user["company_id"]),
+        )
+        prep = cursor.fetchone()
+        if not prep or (prep.get("line_type") or "owned") != "owned":
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Item%20not%20found", status_code=303)
+        movements = list_equipment_movements_for_job(cursor, user["company_id"], job_id)
+        if prep_item_collection_state(movements, prep_item_id) != "out":
+            return RedirectResponse(url=f"/warehouse/job/{job_id}?error=Equipment%20must%20be%20signed%20out%20first", status_code=303)
+        now = datetime.utcnow().isoformat()
+        cursor.execute(
+            """
+            INSERT INTO equipment_movements
+            (company_id, job_id, prep_item_id, equipment_id, movement_type,
+             collected_by_name, condition_in, notes,
+             processed_by_user_id, processed_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user["company_id"],
+                job_id,
+                prep_item_id,
+                prep.get("equipment_id"),
+                "returned",
+                returned_by,
+                condition_in,
+                notes,
+                user["user_id"],
+                now,
+            ),
+        )
+        return RedirectResponse(url=f"/warehouse/job/{job_id}", status_code=303)
     
     
 @app.post("/quotes/dashboard/job/{job_id}/status")
@@ -2773,7 +3583,11 @@ def add_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="add.html",
-        context={"title": "Add Equipment", "current_user": user, "equipment_categories": EQUIPMENT_CATEGORIES},
+        context={
+            "title": "Add Equipment",
+            "current_user": user,
+            "equipment_categories": [c["name"] for c in list_equipment_categories(user["company_id"])],
+        },
     )
 
 
@@ -2797,7 +3611,7 @@ async def add_equipment(
         return RedirectResponse(url="/add?error=Price%20must%20be%200%20or%20more", status_code=303)
     if quantity < 1:
         return RedirectResponse(url="/add?error=Quantity%20must%20be%20at%20least%201", status_code=303)
-    clean_category = category.strip() if category.strip() in EQUIPMENT_CATEGORIES else ""
+    clean_category = normalize_equipment_category(user["company_id"], category)
     with get_db() as conn:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute(
@@ -2813,7 +3627,7 @@ async def add_equipment(
             context={
                 "title": "Add Equipment",
                 "current_user": user,
-                "equipment_categories": EQUIPMENT_CATEGORIES,
+                "equipment_categories": [c["name"] for c in list_equipment_categories(user["company_id"])],
                 "success_name": clean_name,
             },
         )
@@ -2837,7 +3651,7 @@ def edit_equipment_page(request: Request, item_id: int):
                 "title": "Edit Equipment",
                 "item": item,
                 "current_user": user,
-                "equipment_categories": EQUIPMENT_CATEGORIES,
+                "equipment_categories": [c["name"] for c in list_equipment_categories(user["company_id"])],
             },
         )
     
@@ -2872,7 +3686,7 @@ async def edit_equipment(
         qr = int(cur["quantity_rented"] or 0)
         if quantity < qr:
             return RedirectResponse(url=f"/equipment/{item_id}/edit?error=Quantity%20cannot%20be%20less%20than%20rented%20units", status_code=303)
-        clean_category = category.strip() if category.strip() in EQUIPMENT_CATEGORIES else ""
+        clean_category = normalize_equipment_category(user["company_id"], category)
         cursor.execute(
             "UPDATE equipment SET name=%s, price=%s, quantity=%s, category=%s WHERE id=%s AND company_id=%s",
             (clean_name, price, quantity, clean_category, item_id, user["company_id"]),
@@ -3187,6 +4001,7 @@ def quote_page(request: Request):
         cursor.execute("SELECT * FROM clients WHERE company_id=%s ORDER BY name ASC", (user["company_id"],))
         clients = cursor.fetchall()
         company = get_company_settings(user["company_id"])
+        technician_functions = list_technician_functions(user["company_id"])
         return templates.TemplateResponse(
             request=request,
             name="quote.html",
@@ -3196,6 +4011,7 @@ def quote_page(request: Request):
                 "sub_rentals": sub_rentals,
                 "clients": clients,
                 "company": company,
+                "technician_functions": technician_functions,
                 "current_user": user,
             },
         )
@@ -3314,9 +4130,30 @@ async def generate_quote(request: Request):
                     "show_on_quote": show_on_quote,
                 }
             )
+        personnel_lines, personnel_err = parse_personnel_lines_from_form(form_data, user["company_id"], cursor)
+        if personnel_err:
+            return render_message(request, "Create Quote", personnel_err, "/quote", user)
+        lines.extend(personnel_lines)
         if not lines:
-            return render_message(request, "Create Quote", "Please add quantity for at least one owned or sub-rental item.", "/quote", user)
-        subtotal = sum(int(l.get("line_total", 0) or 0) for l in lines)
+            return render_message(
+                request,
+                "Create Quote",
+                "Please add at least one equipment, sub-rental, or personnel line.",
+                "/quote",
+                user,
+            )
+        transport = parse_transport_from_form(form_data)
+        equipment_subtotal = sum(
+            int(l.get("line_total", 0) or 0)
+            for l in lines
+            if str(l.get("line_type") or "").lower() not in ("personnel", "function", "technician")
+        )
+        personnel_subtotal = sum(
+            int(l.get("line_total", 0) or 0)
+            for l in lines
+            if str(l.get("line_type") or "").lower() in ("personnel", "function", "technician")
+        )
+        subtotal = equipment_subtotal + transport["transport_amount"] + personnel_subtotal
         com = get_company_settings(user["company_id"])
         try:
             discount_percent_in = float(str(form_data.get("discount_percent", com.get("default_discount_percent", 0))).strip())
@@ -3334,6 +4171,11 @@ async def generate_quote(request: Request):
             vat_pct_use = 15.0
         vat_pct_use = max(0.0, min(100.0, vat_pct_use))
         totals = compute_financial_totals(subtotal, discount_percent_in, vat_enabled, vat_pct_use)
+        totals["equipment_subtotal"] = equipment_subtotal
+        totals["personnel_subtotal"] = personnel_subtotal
+        totals["transport_amount"] = transport["transport_amount"]
+        totals["transport_type"] = transport["transport_type"]
+        totals["transport_description"] = transport["transport_description"]
         grand_total = int(totals["grand_total"])
         line_items_json = json.dumps(lines)
         created_at = datetime.utcnow().isoformat()
@@ -3344,9 +4186,10 @@ async def generate_quote(request: Request):
                     INSERT INTO quotes (
                         company_id, quote_number, client_name, quote_date, total, line_items_json, status, created_at,
                         subtotal, discount_percent, discount_amount, vat_enabled, vat_percent, vat_amount, grand_total,
-                        job_name, site_location, start_date, end_date, special_notes, quote_terms
+                        job_name, site_location, start_date, end_date, special_notes, quote_terms,
+                        transport_type, transport_description, transport_amount
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
                     (
@@ -3370,6 +4213,9 @@ async def generate_quote(request: Request):
                         end_date or None,
                         special_notes or None,
                         quote_terms or None,
+                        transport["transport_type"],
+                        transport["transport_description"] or None,
+                        transport["transport_amount"],
                     ),
                 )
                 break
@@ -3445,202 +4291,44 @@ def quote_pdf_file_response(
     quote_meta: dict | None = None,
 ) -> FileResponse | HTMLResponse:
     """Build quote PDF from in-memory line items and totals; return FileResponse or error page."""
-    body_rows, _pdf_vis = quote_lines_for_client_pdf(lines)
     with tempfile.NamedTemporaryFile(prefix=f"quote_{qnum}_", suffix=".pdf", delete=False) as tmp:
         temp_pdf_path = Path(tmp.name)
     doc = SimpleDocTemplate(str(temp_pdf_path), pagesize=A4, leftMargin=16 * mm, rightMargin=16 * mm, topMargin=16 * mm, bottomMargin=16 * mm)
     styles = getSampleStyleSheet()
-    content = []
+    content: list = []
     cid = int(user["company_id"])
-    cn = escape(str(settings.get("company_name") or "Rental Company"))
-    header_parts = [f"<b><font size='14'>{cn}</font></b>"]
-    if settings.get("tagline"):
-        header_parts.append(escape(str(settings["tagline"]).strip()))
-    if settings.get("email"):
-        header_parts.append(f"Email: {escape(str(settings['email']).strip())}")
-    if settings.get("phone"):
-        header_parts.append(f"Phone: {escape(str(settings['phone']).strip())}")
-    if settings.get("address"):
-        header_parts.append(f"Address: {escape(str(settings['address']).strip())}")
-    if settings.get("vat_number"):
-        header_parts.append(f"VAT/Reg: {escape(str(settings['vat_number']).strip())}")
-    company_blk = Paragraph("<br/>".join(header_parts), styles["Normal"])
-    logo_flow = pdf_company_logo_flowable(cid)
-    if logo_flow:
-        quote_header = Table([[logo_flow, company_blk]], colWidths=[35 * mm, 143 * mm])
-        quote_header.setStyle(
-            TableStyle(
-                [
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("ALIGN", (0, 0), (0, 0), "LEFT"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
-        )
-        content.append(quote_header)
-    else:
-        content.append(company_blk)
-    content.append(Spacer(1, 12))
     meta = quote_meta or {}
+    left_fields = [("Quote #", qnum), ("Date", date)]
+    content.extend(pdf_document_header_flowables("QUOTE", left_fields, settings, cid, styles))
+
     client_prof = meta.get("client_profile")
     if client_prof is None:
-        client_prof = client_profile_by_name(int(user["company_id"]), client)
-    for flow in pdf_client_details_flowables(client, client_prof, styles):
-        content.append(flow)
-    for flow in pdf_job_details_flowables(
-        meta.get("job_name"),
-        meta.get("site_location"),
-        meta.get("start_date"),
-        meta.get("end_date"),
-        meta.get("special_notes"),
-        styles,
-    ):
-        content.append(flow)
-    content.append(Paragraph(f"Date: {date}", styles["Normal"]))
-    content.append(Paragraph(f"Quote #: {qnum}", styles["Normal"]))
-    content.append(Spacer(1, 12))
-    quote_desc_cell_style = ParagraphStyle(
-        name="QuotePdfEquipmentDescCell",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=9,
-        leading=12,
-        alignment=TA_LEFT,
-        wordWrap="CJK",
-        spaceBefore=0,
-        spaceAfter=0,
-    )
-    table_rows: list[list] = [["Qty", "Equipment / Description", "Unit Price", "Days", "Line Total"]]
-    if not body_rows:
-        table_rows.append(
-            [
-                "—",
-                Paragraph(escape("No line items included on this client quote."), quote_desc_cell_style),
-                "",
-                "",
-                "",
-            ]
+        client_prof = client_profile_by_name(cid, client)
+    content.extend(pdf_client_section_flowables(client, client_prof, styles))
+    content.extend(
+        pdf_job_section_flowables(
+            meta.get("job_name"),
+            meta.get("site_location"),
+            meta.get("start_date"),
+            meta.get("end_date"),
+            meta.get("special_notes"),
+            styles,
         )
-    else:
-        for br in body_rows:
-            table_rows.append(
-                [
-                    br[0],
-                    Paragraph(escape(str(br[1])), quote_desc_cell_style),
-                    br[2],
-                    br[3],
-                    br[4],
-                ]
-            )
+    )
+    content.extend(pdf_equipment_table_flowables(lines, styles, quote_style=True))
+    transport = {
+        "transport_type": fin.get("transport_type", "none"),
+        "transport_description": fin.get("transport_description", ""),
+        "transport_amount": int(fin.get("transport_amount") or 0),
+    }
+    content.extend(pdf_transport_section_flowables(transport, styles))
+    content.extend(pdf_personnel_section_flowables(lines, styles))
+
     quote_col_widths = [12 * mm, 104 * mm, 26 * mm, 12 * mm, 24 * mm]
-    quote_table = Table(table_rows, colWidths=quote_col_widths, repeatRows=1)
-    quote_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2f3b52")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("ALIGN", (0, 0), (0, -1), "CENTER"),
-                ("ALIGN", (2, 1), (4, -1), "RIGHT"),
-                ("ALIGN", (1, 0), (1, -1), "LEFT"),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d9dce3")),
-                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f9fc")]),
-            ]
-        )
-    )
-    content.append(quote_table)
-    content.append(Spacer(1, 12))
-    red_hex = "#b91c1c"
-    discount_label_style = ParagraphStyle(
-        name="QuotePdfDiscountLbl",
-        parent=styles["Normal"],
-        textColor=colors.HexColor(red_hex),
-        fontSize=10,
-        alignment=TA_LEFT,
-    )
-    discount_amt_style = ParagraphStyle(
-        name="QuotePdfDiscountAmt",
-        parent=styles["Normal"],
-        textColor=colors.HexColor(red_hex),
-        fontSize=10,
-        alignment=TA_RIGHT,
-    )
-    quote_summary_amt_style = ParagraphStyle(
-        name="QuotePdfSummaryAmt",
-        parent=styles["Normal"],
-        fontSize=10,
-        alignment=TA_RIGHT,
-    )
-    grand_label_style = ParagraphStyle(
-        name="QuotePdfGrandLbl",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        alignment=TA_LEFT,
-    )
-    grand_amt_style = ParagraphStyle(
-        name="QuotePdfGrandAmt",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        alignment=TA_RIGHT,
-    )
-    tot_rows: list[list] = [
-        ["Subtotal", Paragraph(escape(f"R{int(round(float(fin['subtotal'])))}"), quote_summary_amt_style)],
-    ]
-    if int(fin.get("discount_amount") or 0) > 0:
-        dp = fin["discount_percent"]
-        tot_rows.append(
-            [
-                Paragraph(escape(f"Discount ({dp:g}%)"), discount_label_style),
-                Paragraph(escape(f"R{int(round(float(fin['discount_amount'])))}"), discount_amt_style),
-            ]
-        )
-    if fin.get("vat_enabled") and int(fin.get("vat_amount") or 0) > 0:
-        vp = fin["vat_percent"]
-        tot_rows.append(
-            [
-                Paragraph(escape(f"VAT ({vp:g}%)"), styles["Normal"]),
-                Paragraph(escape(f"R{int(round(float(fin['vat_amount'])))}"), quote_summary_amt_style),
-            ]
-        )
-    tot_rows.append(
-        [
-            Paragraph("Grand total", grand_label_style),
-            Paragraph(escape(f"R{int(round(float(fin['grand_total'])))}"), grand_amt_style),
-        ]
-    )
-    quote_line_items_width = sum(quote_col_widths)
-    q_totals_amt_col_w = 52 * mm
-    q_totals_label_col_w = quote_line_items_width - q_totals_amt_col_w
-    total_table = Table(tot_rows, colWidths=[q_totals_label_col_w, q_totals_amt_col_w])
-    total_table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#eef2f8")),
-                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
-                ("ALIGN", (0, 0), (0, -1), "LEFT"),
-                ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("BOX", (0, 0), (-1, -1), 0.75, colors.HexColor("#c2c8d3")),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]
-        )
-    )
-    content.append(total_table)
-    content.append(Spacer(1, 10))
-    for flow in pdf_terms_flowables(meta.get("quote_terms"), styles):
-        content.append(flow)
-    for flow in pdf_banking_detail_flowables(settings, styles):
-        content.append(flow)
-    if settings.get("quote_footer"):
-        content.append(Spacer(1, 6))
-        content.append(Paragraph(settings["quote_footer"], styles["Italic"]))
+    content.extend(pdf_totals_table_flowables(fin, styles, line_items_width=sum(quote_col_widths)))
+    content.extend(pdf_terms_section_flowables(meta.get("quote_terms"), styles))
+    content.extend(pdf_banking_section_flowables(settings, styles))
+    content.extend(pdf_thank_you_footer_flowables(settings, styles))
     try:
         doc.build(content)
     except Exception:

@@ -1294,6 +1294,291 @@ th {
   margin: 0 0 6px;
 }
 
+/* Technician functions (settings) */
+.settings-tech-fn__add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+
+.settings-tech-fn__add-btn {
+  flex: 0 0 auto;
+}
+
+.settings-tech-fn__table {
+  margin-top: 16px;
+  width: 100%;
+}
+
+.settings-tech-fn__row-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.settings-tech-fn__row-form input[name="function_name"] {
+  flex: 1 1 160px;
+  min-width: 120px;
+}
+
+.settings-tech-fn__row-form input[name="day_rate"] {
+  width: 100px;
+}
+
+.settings-tech-fn__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-tech-fn__delete-form {
+  display: inline;
+  margin: 0;
+}
+
+/* Quote personnel builder */
+.personnel-builder {
+  margin-bottom: 8px;
+}
+
+.personnel-builder__row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 20px;
+}
+
+.personnel-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.personnel-field label,
+.personnel-field__action-label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #334155;
+  line-height: 1.2;
+}
+
+.personnel-field__action-label {
+  display: block;
+  user-select: none;
+}
+
+.personnel-field select,
+.personnel-field input[type="number"] {
+  width: 100%;
+  min-height: 40px;
+  margin-bottom: 0;
+  padding: 8px 10px;
+  font-size: 0.9375rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+
+.personnel-field--function,
+.personnel-field--qty,
+.personnel-field--days,
+.personnel-field--rate,
+.personnel-field--action {
+  min-width: 0;
+}
+
+.personnel-field--action .btn {
+  width: 100%;
+  min-height: 40px;
+  white-space: nowrap;
+  margin-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .personnel-builder__row {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+}
+
+.personnel-lines-table {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.personnel-lines-table th:last-child,
+.personnel-lines-table td:last-child {
+  width: 88px;
+  text-align: right;
+}
+
+/* Warehouse sign-out / sign-in */
+.warehouse-sign-section {
+  margin-top: 28px;
+  padding-top: 8px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.warehouse-sign-section__title {
+  font-size: 1.1rem;
+  margin: 0 0 8px;
+}
+
+.warehouse-sign-card {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fafbfc;
+}
+
+.warehouse-sign-card__item {
+  margin: 0 0 12px;
+  font-size: 0.9375rem;
+}
+
+.warehouse-sign-form label {
+  display: block;
+  margin-bottom: 12px;
+  font-size: 0.875rem;
+}
+
+.warehouse-sign-form input[type="text"],
+.warehouse-sign-form input[type="tel"],
+.warehouse-sign-form select,
+.warehouse-sign-form textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+  font-size: 1rem;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  box-sizing: border-box;
+}
+
+.warehouse-sign-form textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.warehouse-sign-meta {
+  margin: 0 0 12px;
+  font-size: 0.875rem;
+  color: #475569;
+}
+
+.warehouse-sign-form .btn {
+  width: 100%;
+  min-height: 48px;
+}
+
+.warehouse-movements-section {
+  margin-top: 28px;
+  padding-top: 8px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.warehouse-movements-log {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.warehouse-movement-entry {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  font-size: 0.875rem;
+}
+
+.warehouse-movement-entry--collected {
+  border-left: 4px solid #0066cc;
+}
+
+.warehouse-movement-entry--returned {
+  border-left: 4px solid #16a34a;
+}
+
+.warehouse-movement-entry__head {
+  margin: 0 0 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.warehouse-movement-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: #e2e8f0;
+  color: #334155;
+}
+
+.warehouse-movement-entry__details {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.warehouse-movement-entry__details li {
+  margin-bottom: 4px;
+  line-height: 1.45;
+}
+
+.warehouse-movement-entry__details span {
+  color: #64748b;
+  margin-right: 6px;
+}
+
+.job-movements-details {
+  margin-top: 10px;
+  width: 100%;
+  font-size: 0.8125rem;
+}
+
+.job-movements-details summary {
+  cursor: pointer;
+  color: #0066cc;
+  font-weight: 600;
+}
+
+.job-movements-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  text-align: left;
+}
+
+.job-movements-list li {
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.required {
+  color: #b91c1c;
+}
+
+@media (min-width: 520px) {
+  .warehouse-sign-form .btn {
+    width: auto;
+    min-width: 140px;
+  }
+}
+
 .warehouse-prep-sub-line {
   display: block;
   font-size: 0.8125rem;
@@ -1849,4 +2134,172 @@ body.auth-page .site-footer {
   .auth-card {
     padding: 36px 32px 40px;
   }
+}
+
+/* Transport on create quote */
+.transport-section {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 0 0 8px;
+}
+
+.transport-section fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.transport-options {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 0;
+  margin-bottom: 0;
+}
+
+.transport-option {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  white-space: nowrap;
+  cursor: pointer;
+  flex: 0 0 auto;
+  width: auto;
+  max-width: none;
+}
+
+.transport-option__text {
+  line-height: 1.2;
+  margin: 0;
+  padding: 0;
+}
+
+.transport-section .transport-option input[type="radio"] {
+  width: 1em;
+  height: 1em;
+  min-width: 1em;
+  max-width: 1em;
+  min-height: 1em;
+  margin: 0;
+  margin-bottom: 0;
+  padding: 0;
+  flex: 0 0 1em;
+  box-sizing: border-box;
+  accent-color: #0066cc;
+  vertical-align: middle;
+}
+
+.transport-panels {
+  margin-top: 8px;
+}
+
+.transport-panel[hidden] {
+  display: none !important;
+}
+
+.transport-panel:not([hidden]) {
+  padding-top: 10px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.transport-panel--fixed:not([hidden]) {
+  display: block;
+  max-width: 280px;
+}
+
+.transport-panel--per-km:not([hidden]),
+.transport-panel--vehicle:not([hidden]) {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+  max-width: 560px;
+}
+
+.transport-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.transport-field label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #334155;
+  margin: 0;
+}
+
+.transport-panel__calc {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.transport-field input[type="number"],
+.transport-field input[type="text"] {
+  width: 100%;
+  max-width: none;
+  min-height: 36px;
+  margin-bottom: 0;
+  padding: 6px 10px;
+  font-size: 0.9375rem;
+  border-radius: 6px;
+  box-sizing: border-box;
+}
+
+@media (max-width: 600px) {
+  .transport-options {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 10px 16px;
+  }
+
+  .transport-panel--per-km:not([hidden]),
+  .transport-panel--vehicle:not([hidden]) {
+    grid-template-columns: 1fr;
+    max-width: none;
+  }
+}
+
+/* Settings category management */
+.settings-categories__add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: stretch;
+  margin-top: 6px;
+}
+
+.settings-categories__add-row input {
+  flex: 1 1 200px;
+  min-height: 44px;
+}
+
+.settings-categories__list {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+}
+
+.settings-categories__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid #e2e8f0;
 }

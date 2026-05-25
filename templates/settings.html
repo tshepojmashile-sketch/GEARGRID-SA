@@ -75,5 +75,86 @@
 
   <button class="btn blue" type="submit">Save Settings</button>
 </form>
+
+<section class="settings-categories" style="margin-top:32px">
+  <h2 class="title" style="margin-top:0;font-size:1.1rem">Category Management</h2>
+  <p class="meta">Custom categories appear on equipment forms and the dashboard filter.</p>
+  <form method="post" action="/settings/categories/add" class="settings-categories__add">
+    <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+    <label for="category_name">New category</label>
+    <div class="settings-categories__add-row">
+      <input id="category_name" name="category_name" placeholder="e.g. Cables" required>
+      <button class="btn blue" type="submit">Add</button>
+    </div>
+  </form>
+  {% if equipment_categories %}
+  <ul class="settings-categories__list">
+    {% for cat in equipment_categories %}
+    <li class="settings-categories__item">
+      <span>{{ cat['name'] }}</span>
+      <form method="post" action="/settings/categories/{{ cat['id'] }}/delete" class="settings-categories__delete">
+        <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+        <button type="submit" class="btn btn-sm btn-secondary-outline">Delete</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="meta">No categories yet. Add one above.</p>
+  {% endif %}
+</section>
+
+<section class="settings-technician-functions" style="margin-top:32px">
+  <h2 class="title" style="margin-top:0;font-size:1.1rem">Technician Functions</h2>
+  <p class="meta">Default day rates for personnel on quotes. Staff can override rates per quote.</p>
+  <form method="post" action="/settings/technician-functions/add" class="settings-tech-fn__add">
+    <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+    <div class="settings-tech-fn__add-row">
+      <div>
+        <label for="tf_name">Function name</label><br>
+        <input id="tf_name" name="function_name" placeholder="e.g. RF Technician" required>
+      </div>
+      <div>
+        <label for="tf_rate">Day rate (R)</label><br>
+        <input id="tf_rate" name="day_rate" type="number" min="0" value="0" required>
+      </div>
+      <div class="settings-tech-fn__add-btn">
+        <button class="btn blue" type="submit">Add function</button>
+      </div>
+    </div>
+  </form>
+  {% if technician_functions %}
+  <table class="settings-tech-fn__table quote-dash-table">
+    <thead>
+      <tr>
+        <th>Function name</th>
+        <th>Day rate</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for fn in technician_functions %}
+      <tr>
+        <td colspan="3" data-label="Function">
+          <form method="post" action="/settings/technician-functions/{{ fn['id'] }}/edit" class="settings-tech-fn__row-form">
+            <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+            <input name="function_name" value="{{ fn['function_name'] }}" required aria-label="Function name">
+            <input name="day_rate" type="number" min="0" value="{{ fn['day_rate'] }}" required aria-label="Day rate">
+            <button type="submit" class="btn btn-sm btn-primary-outline">Save</button>
+          </form>
+          <form method="post" action="/settings/technician-functions/{{ fn['id'] }}/delete" class="settings-tech-fn__delete-form" onsubmit="return confirm('Delete this function?');">
+            <input type="hidden" name="csrf_token" value="{{ current_user['csrf_token'] }}">
+            <button type="submit" class="btn btn-sm btn-secondary-outline">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="meta">No technician functions yet.</p>
+  {% endif %}
+</section>
+
 <p><a href="/">Back</a></p>
 {% endblock %}

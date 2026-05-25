@@ -88,9 +88,116 @@
     <p class="meta">No sub-rented stock with available units. Add items on <a href="/sub-rentals">Sub-Rentals</a>.</p>
   {% endif %}
 
-  {% if items or sub_rentals %}
+  {% if items or sub_rentals or technician_functions %}
+    {% if items or sub_rentals %}
+    <h2 class="title" style="margin-top:24px;font-size:1.1rem">Transport &amp; delivery</h2>
+    <fieldset class="transport-section">
+      <legend class="visually-hidden">Transport options</legend>
+      <div class="transport-options" role="radiogroup" aria-label="Transport type">
+        <label class="transport-option">
+          <input type="radio" name="transport_type" value="none" checked>
+          <span class="transport-option__text">No transport</span>
+        </label>
+        <label class="transport-option">
+          <input type="radio" name="transport_type" value="fixed_fee">
+          <span class="transport-option__text">Fixed fee</span>
+        </label>
+        <label class="transport-option">
+          <input type="radio" name="transport_type" value="per_km">
+          <span class="transport-option__text">Per km</span>
+        </label>
+        <label class="transport-option">
+          <input type="radio" name="transport_type" value="vehicle_hire">
+          <span class="transport-option__text">Vehicle hire</span>
+        </label>
+      </div>
+      <div class="transport-panels">
+        <div id="transport-fixed" class="transport-panel transport-panel--fixed" hidden>
+          <div class="transport-field">
+            <label for="transport_fixed_amount">Amount (Rands)</label>
+            <input type="number" min="0" id="transport_fixed_amount" name="transport_fixed_amount" value="0">
+          </div>
+        </div>
+        <div id="transport-per-km" class="transport-panel transport-panel--per-km" hidden>
+          <div class="transport-field">
+            <label for="transport_distance_km">Distance (km)</label>
+            <input type="number" min="0" id="transport_distance_km" name="transport_distance_km" value="0">
+          </div>
+          <div class="transport-field">
+            <label for="transport_rate_per_km">Rate per km (Rands)</label>
+            <input type="number" min="0" id="transport_rate_per_km" name="transport_rate_per_km" value="0">
+          </div>
+          <p class="meta transport-panel__calc">Calculated: R<span id="transport-per-km-total">0</span></p>
+        </div>
+        <div id="transport-vehicle" class="transport-panel transport-panel--vehicle" hidden>
+          <div class="transport-field">
+            <label for="transport_vehicle_description">Vehicle description</label>
+            <input type="text" id="transport_vehicle_description" name="transport_vehicle_description" placeholder="e.g. 1-ton bakkie">
+          </div>
+          <div class="transport-field">
+            <label for="transport_day_rate">Day rate (Rands)</label>
+            <input type="number" min="0" id="transport_day_rate" name="transport_day_rate" value="0">
+          </div>
+        </div>
+      </div>
+    </fieldset>
+    {% endif %}
+
+    <h2 class="title" style="margin-top:24px;font-size:1.1rem">Personnel</h2>
+    {% if technician_functions %}
+    <p class="meta">Add crew or technician lines. Day rate defaults from company settings but can be overridden.</p>
+    <div class="personnel-builder">
+      <div class="personnel-builder__row">
+        <div class="personnel-field personnel-field--function">
+          <label for="personnel_function_select">Function</label>
+          <select id="personnel_function_select">
+            <option value="">— Select function —</option>
+            {% for fn in technician_functions %}
+            <option value="{{ fn['id'] }}" data-name="{{ fn['function_name']|e }}" data-rate="{{ fn['day_rate'] }}">{{ fn['function_name'] }} (R{{ fn['day_rate'] }}/day)</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="personnel-field personnel-field--qty">
+          <label for="personnel_qty_input">Qty</label>
+          <input type="number" id="personnel_qty_input" min="1" value="1">
+        </div>
+        <div class="personnel-field personnel-field--days">
+          <label for="personnel_days_input">Days</label>
+          <input type="number" id="personnel_days_input" min="1" value="1">
+        </div>
+        <div class="personnel-field personnel-field--rate">
+          <label for="personnel_rate_input">Day rate (R)</label>
+          <input type="number" id="personnel_rate_input" min="0" value="0">
+        </div>
+        <div class="personnel-field personnel-field--action">
+          <span class="personnel-field__action-label" aria-hidden="true">&nbsp;</span>
+          <button type="button" class="btn blue" id="personnel_add_btn">Add line</button>
+        </div>
+      </div>
+      <table class="personnel-lines-table quote-dash-table" id="personnel-lines-table" hidden>
+        <thead>
+          <tr>
+            <th>Function</th>
+            <th>Qty</th>
+            <th>Days</th>
+            <th>Rate</th>
+            <th>Line total</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="personnel-lines-body"></tbody>
+      </table>
+      <input type="hidden" name="personnel_json" id="personnel_json" value="[]">
+    </div>
+    {% else %}
+    <p class="meta">No technician functions configured. <a href="/settings">Add functions in Company Settings</a>.</p>
+    {% endif %}
+
     <h2 class="title" style="margin-top:24px;font-size:1.1rem">Totals</h2>
-    <p class="meta">Subtotal updates as you enter quantities (final amounts are calculated on the server when you submit).</p>
+    <p class="meta">Equipment, personnel, and transport (if any) are combined before discount and VAT.</p>
+    <p><strong>Equipment subtotal:</strong> R<span id="quote-equipment-subtotal-val">0</span></p>
+    <p id="quote-personnel-line" hidden><strong>Personnel:</strong> R<span id="quote-personnel-val">0</span></p>
+    <p id="quote-transport-line" hidden><strong>Transport &amp; delivery:</strong> R<span id="quote-transport-val">0</span></p>
     <p><strong>Subtotal:</strong> R<span id="quote-subtotal-val">0</span></p>
     <p>
       <label for="discount_percent">Discount %</label><br>
@@ -113,7 +220,7 @@
       <button class="btn purple" type="submit" id="quote-submit-btn">Create Quote</button>
     </div>
   {% else %}
-    <p>No equipment or sub-rentals available to quote.</p>
+    <p class="meta">No equipment or sub-rentals available. Add personnel above or stock in Equipment / Sub-Rentals.</p>
   {% endif %}
 </form>
 
@@ -134,6 +241,15 @@
   var form = document.getElementById("quote-form");
   if (!form) return;
   var vatRate = {{ (company.get('vat_percent') or 15)|float }};
+  var personnelLines = [];
+  var personnelFnSelect = document.getElementById("personnel_function_select");
+  var personnelQtyInput = document.getElementById("personnel_qty_input");
+  var personnelDaysInput = document.getElementById("personnel_days_input");
+  var personnelRateInput = document.getElementById("personnel_rate_input");
+  var personnelAddBtn = document.getElementById("personnel_add_btn");
+  var personnelTable = document.getElementById("personnel-lines-table");
+  var personnelBody = document.getElementById("personnel-lines-body");
+  var personnelJsonInput = document.getElementById("personnel_json");
   var clientSelect = document.getElementById("client_id");
   var panel = document.getElementById("client-details-panel");
 
@@ -178,8 +294,119 @@
     });
   }
 
+  function transportAmount() {
+    var typeEl = form.querySelector('input[name="transport_type"]:checked');
+    var t = typeEl ? typeEl.value : "none";
+    if (t === "fixed_fee") {
+      return parseInt((document.getElementById("transport_fixed_amount") || {}).value || "0", 10) || 0;
+    }
+    if (t === "per_km") {
+      var km = parseInt((document.getElementById("transport_distance_km") || {}).value || "0", 10) || 0;
+      var rate = parseInt((document.getElementById("transport_rate_per_km") || {}).value || "0", 10) || 0;
+      return km * rate;
+    }
+    if (t === "vehicle_hire") {
+      return parseInt((document.getElementById("transport_day_rate") || {}).value || "0", 10) || 0;
+    }
+    return 0;
+  }
+
+  function updateTransportPanels() {
+    var t = (form.querySelector('input[name="transport_type"]:checked') || {}).value || "none";
+    var fixed = document.getElementById("transport-fixed");
+    var perKm = document.getElementById("transport-per-km");
+    var vehicle = document.getElementById("transport-vehicle");
+    if (fixed) fixed.hidden = t !== "fixed_fee";
+    if (perKm) perKm.hidden = t !== "per_km";
+    if (vehicle) vehicle.hidden = t !== "vehicle_hire";
+    var pkTotal = document.getElementById("transport-per-km-total");
+    if (pkTotal && t === "per_km") {
+      pkTotal.textContent = String(transportAmount());
+    }
+  }
+
+  function syncPersonnelJson() {
+    if (personnelJsonInput) personnelJsonInput.value = JSON.stringify(personnelLines);
+  }
+
+  function personnelSubtotal() {
+    return personnelLines.reduce(function (sum, ln) {
+      return sum + (ln.qty * ln.days * ln.day_rate);
+    }, 0);
+  }
+
+  function renderPersonnelTable() {
+    if (!personnelBody || !personnelTable) return;
+    personnelBody.innerHTML = "";
+    personnelLines.forEach(function (ln, idx) {
+      var total = ln.qty * ln.days * ln.day_rate;
+      var tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td data-label=\"Function\">" + ln.name + "</td>" +
+        "<td data-label=\"Qty\">" + ln.qty + "</td>" +
+        "<td data-label=\"Days\">" + ln.days + "</td>" +
+        "<td data-label=\"Rate\">R" + ln.day_rate + "</td>" +
+        "<td data-label=\"Line total\">R" + total + "</td>" +
+        "<td data-label=\"\"><button type=\"button\" class=\"btn btn-sm btn-secondary-outline js-personnel-remove\" data-idx=\"" + idx + "\">Remove</button></td>";
+      personnelBody.appendChild(tr);
+    });
+    personnelTable.hidden = personnelLines.length === 0;
+    syncPersonnelJson();
+  }
+
+  if (personnelFnSelect) {
+    personnelFnSelect.addEventListener("change", function () {
+      var opt = personnelFnSelect.options[personnelFnSelect.selectedIndex];
+      if (!opt || !opt.value) return;
+      if (personnelRateInput) personnelRateInput.value = opt.getAttribute("data-rate") || "0";
+    });
+  }
+
+  if (personnelAddBtn) {
+    personnelAddBtn.addEventListener("click", function () {
+      if (!personnelFnSelect || !personnelFnSelect.value) {
+        alert("Select a function first.");
+        return;
+      }
+      var opt = personnelFnSelect.options[personnelFnSelect.selectedIndex];
+      var qty = parseInt((personnelQtyInput || {}).value || "1", 10) || 0;
+      var days = parseInt((personnelDaysInput || {}).value || "1", 10) || 0;
+      var rate = parseInt((personnelRateInput || {}).value || "0", 10) || 0;
+      if (qty < 1 || days < 1) {
+        alert("Quantity and days must be at least 1.");
+        return;
+      }
+      if (rate < 0) {
+        alert("Day rate cannot be negative.");
+        return;
+      }
+      personnelLines.push({
+        function_id: parseInt(personnelFnSelect.value, 10),
+        name: opt.getAttribute("data-name") || opt.textContent,
+        qty: qty,
+        days: days,
+        day_rate: rate
+      });
+      renderPersonnelTable();
+      recalc();
+    });
+  }
+
+  if (personnelBody) {
+    personnelBody.addEventListener("click", function (e) {
+      var btn = e.target.closest(".js-personnel-remove");
+      if (!btn) return;
+      var idx = parseInt(btn.getAttribute("data-idx"), 10);
+      if (!isNaN(idx)) {
+        personnelLines.splice(idx, 1);
+        renderPersonnelTable();
+        recalc();
+      }
+    });
+  }
+
   function recalc() {
-    var sub = 0;
+    var equipSub = 0;
     form.querySelectorAll("tr.js-quote-line").forEach(function (row) {
       var price = parseInt(row.getAttribute("data-unit-price") || "0", 10) || 0;
       var q = row.querySelector(".js-qty");
@@ -187,8 +414,11 @@
       var qty = q ? (parseInt(q.value, 10) || 0) : 0;
       var days = d ? (parseInt(d.value, 10) || 0) : 0;
       if (days < 1) days = 1;
-      sub += qty * price * days;
+      equipSub += qty * price * days;
     });
+    var transport = transportAmount();
+    var personnel = personnelSubtotal();
+    var sub = equipSub + transport + personnel;
     var discPct = parseFloat((document.getElementById("discount_percent") || {}).value || "0");
     if (isNaN(discPct) || discPct < 0) discPct = 0;
     if (discPct > 100) discPct = 100;
@@ -198,13 +428,40 @@
     var vatAmt = vatOn ? Math.round(after * vatRate / 100) : 0;
     var grand = after + vatAmt;
     var el = function (id) { return document.getElementById(id); };
+    if (el("quote-equipment-subtotal-val")) el("quote-equipment-subtotal-val").textContent = String(equipSub);
+    var pLine = el("quote-personnel-line");
+    if (pLine) {
+      if (personnel > 0) {
+        pLine.hidden = false;
+        if (el("quote-personnel-val")) el("quote-personnel-val").textContent = String(personnel);
+      } else {
+        pLine.hidden = true;
+      }
+    }
+    var tLine = el("quote-transport-line");
+    if (tLine) {
+      if (transport > 0) {
+        tLine.hidden = false;
+        if (el("quote-transport-val")) el("quote-transport-val").textContent = String(transport);
+      } else {
+        tLine.hidden = true;
+      }
+    }
     if (el("quote-subtotal-val")) el("quote-subtotal-val").textContent = String(sub);
     if (el("quote-discount-amt")) el("quote-discount-amt").textContent = String(discAmt);
     if (el("quote-vat-amt")) el("quote-vat-amt").textContent = String(vatAmt);
     if (el("quote-grand-val")) el("quote-grand-val").textContent = String(grand);
+    updateTransportPanels();
   }
+  form.querySelectorAll('input[name="transport_type"]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      updateTransportPanels();
+      recalc();
+    });
+  });
   form.addEventListener("input", recalc);
   form.addEventListener("change", recalc);
+  updateTransportPanels();
   recalc();
 
   var banking = {
@@ -217,7 +474,7 @@
   };
 
   function getTotals() {
-    var sub = 0;
+    var equipSub = 0;
     var lines = [];
     form.querySelectorAll("tr.js-quote-line").forEach(function (row) {
       var price = parseInt(row.getAttribute("data-unit-price") || "0", 10) || 0;
@@ -232,7 +489,7 @@
         if (showSel && showSel.value !== "1") return;
       }
       var lineTotal = qty * price * days;
-      sub += lineTotal;
+      equipSub += lineTotal;
       lines.push({
         name: row.getAttribute("data-line-name") || "Item",
         qty: qty,
@@ -244,12 +501,25 @@
     var discPct = parseFloat((document.getElementById("discount_percent") || {}).value || "0");
     if (isNaN(discPct) || discPct < 0) discPct = 0;
     if (discPct > 100) discPct = 100;
+    var transport = transportAmount();
+    var personnel = personnelSubtotal();
+    personnelLines.forEach(function (ln) {
+      lines.push({
+        name: ln.name,
+        qty: ln.qty,
+        days: ln.days,
+        unit: ln.day_rate,
+        total: ln.qty * ln.days * ln.day_rate,
+        isPersonnel: true
+      });
+    });
+    var sub = equipSub + transport + personnel;
     var discAmt = Math.round(sub * discPct / 100);
     var after = Math.max(0, sub - discAmt);
     var vatOn = document.getElementById("vat_on") && document.getElementById("vat_on").checked;
     var vatAmt = vatOn ? Math.round(after * vatRate / 100) : 0;
     var grand = after + vatAmt;
-    return { lines: lines, sub: sub, discPct: discPct, discAmt: discAmt, vatAmt: vatAmt, grand: grand, vatOn: vatOn };
+    return { lines: lines, equipSub: equipSub, personnel: personnel, transport: transport, sub: sub, discPct: discPct, discAmt: discAmt, vatAmt: vatAmt, grand: grand, vatOn: vatOn };
   }
 
   var modal = document.getElementById("quote-preview-modal");
@@ -280,7 +550,7 @@
     }
     var totals = getTotals();
     if (!totals.lines.length) {
-      alert("Add at least one line item with quantity greater than zero.");
+      alert("Add at least one equipment, sub-rental, or personnel line.");
       return;
     }
     var clientName = clientSelect.options[clientSelect.selectedIndex].text;
@@ -291,6 +561,13 @@
       html += "<tr><td>" + ln.name + "</td><td>" + ln.qty + "</td><td>" + ln.days + "</td><td>R" + ln.unit + "</td><td>R" + ln.total + "</td></tr>";
     });
     html += "</tbody></table>";
+    html += "<p><strong>Equipment subtotal:</strong> R" + totals.equipSub + "</p>";
+    if (totals.personnel > 0) {
+      html += "<p><strong>Personnel:</strong> R" + totals.personnel + "</p>";
+    }
+    if (totals.transport > 0) {
+      html += "<p><strong>Transport &amp; delivery:</strong> R" + totals.transport + "</p>";
+    }
     html += "<p><strong>Subtotal:</strong> R" + totals.sub + "</p>";
     html += "<p><strong>Discount (" + totals.discPct + "%):</strong> R" + totals.discAmt + "</p>";
     html += "<p><strong>VAT:</strong> R" + totals.vatAmt + (totals.vatOn ? "" : " (not applied)") + "</p>";
@@ -309,8 +586,18 @@
   if (previewBtn) previewBtn.addEventListener("click", openPreview);
   document.getElementById("quote-preview-edit").addEventListener("click", closePreview);
   document.getElementById("quote-preview-generate").addEventListener("click", function () {
+    syncPersonnelJson();
     closePreview();
     form.requestSubmit(document.getElementById("quote-submit-btn"));
+  });
+  var submitBtn = document.getElementById("quote-submit-btn");
+  if (submitBtn) {
+    submitBtn.addEventListener("click", function () {
+      syncPersonnelJson();
+    });
+  }
+  form.addEventListener("submit", function () {
+    syncPersonnelJson();
   });
   modal.addEventListener("click", function (e) {
     if (e.target === modal) closePreview();
