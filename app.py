@@ -1731,7 +1731,7 @@ def pdf_section_heading(label: str, styles) -> Paragraph:
     )
 
 
-def pdf_company_details_paragraph(settings: dict, styles) -> Paragraph:
+def pdf_company_details_paragraph(settings: dict, styles, *, align_right: bool = False) -> Paragraph:
     cn = escape(str(settings.get("company_name") or "Company"))
     parts = [f"<b><font size='12'>{cn}</font></b>"]
     if settings.get("tagline"):
@@ -1744,7 +1744,14 @@ def pdf_company_details_paragraph(settings: dict, styles) -> Paragraph:
         parts.append(f"Address: {escape(str(settings['address']).strip())}")
     if settings.get("vat_number"):
         parts.append(f"VAT/Reg: {escape(str(settings['vat_number']).strip())}")
-    return Paragraph("<br/>".join(parts), styles["Normal"])
+    para_style = styles["Normal"]
+    if align_right:
+        para_style = ParagraphStyle(
+            name="PdfCompanyDetailsRight",
+            parent=styles["Normal"],
+            alignment=TA_RIGHT,
+        )
+    return Paragraph("<br/>".join(parts), para_style)
 
 
 def pdf_document_header_flowables(
@@ -1759,39 +1766,24 @@ def pdf_document_header_flowables(
     for label, value in left_fields:
         left_lines.append(f"<b>{escape(label)}</b> {escape(str(value or '—'))}")
     left_para = Paragraph("<br/>".join(left_lines), styles["Normal"])
-    right_parts: list = []
     logo_flow = pdf_company_logo_flowable(company_id) if company_id else None
-    company_para = pdf_company_details_paragraph(settings, styles)
+    company_para = pdf_company_details_paragraph(settings, styles, align_right=True)
+    right_rows: list[list] = []
     if logo_flow:
-        logo_cell = Table([[logo_flow]], colWidths=[84 * mm])
-        logo_cell.setStyle(
-            TableStyle(
-                [
-                    ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                    ("TOPPADDING", (0, 0), (-1, -1), 0),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                ]
-            )
-        )
-        right_parts.append(logo_cell)
-    right_parts.append(company_para)
-    if len(right_parts) == 1:
-        right_cell: object = right_parts[0]
-    else:
-        right_cell = Table([[p] for p in right_parts], colWidths=[84 * mm])
-        right_cell.setStyle(
-            TableStyle(
-                [
-                    ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-                ]
-            )
-        )
+        right_rows.append([logo_flow])
+    right_rows.append([company_para])
+    right_cell: object = Table(right_rows, colWidths=[84 * mm])
+    right_style: list = [
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]
+    if logo_flow:
+        right_style.append(("BOTTOMPADDING", (0, 0), (-1, 0), 4))
+    right_cell.setStyle(TableStyle(right_style))
     header = Table([[left_para, right_cell]], colWidths=[85 * mm, 84 * mm])
     header.setStyle(
         TableStyle(
