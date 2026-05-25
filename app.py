@@ -2272,7 +2272,7 @@ def pdf_company_logo_flowable(company_id: int) -> RLImage | None:
         iw, ih = ir.getSize()
         if iw <= 0 or ih <= 0:
             return None
-        max_h_pt = 120.0
+        max_h_pt = 60.0
         max_w_pt = 200.0
         scale = min(max_w_pt / float(iw), max_h_pt / float(ih), 1.0)
         dw = iw * scale
