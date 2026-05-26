@@ -614,6 +614,7 @@ def init_db() -> None:
             ("bank_branch_code", "ALTER TABLE companies ADD COLUMN bank_branch_code TEXT"),
             ("bank_reference", "ALTER TABLE companies ADD COLUMN bank_reference TEXT"),
             ("terms_and_conditions", "ALTER TABLE companies ADD COLUMN terms_and_conditions TEXT"),
+            ("logo_url", "ALTER TABLE companies ADD COLUMN logo_url TEXT DEFAULT NULL"),
         ):
             if not has_column(cursor, "companies", col):
                 cursor.execute(ddl)
@@ -1245,7 +1246,39 @@ def parse_invoice_line_items_json(raw: str | None) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def cloudinary_configured() -> bool:
+    return bool(
+        os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip()
+        and os.environ.get("CLOUDINARY_API_KEY", "").strip()
+        and os.environ.get("CLOUDINARY_API_SECRET", "").strip()
+    )
+
+
+def company_logo_url_from_settings(settings: dict | None) -> str | None:
+    if not settings:
+        return None
+    url = str(settings.get("logo_url") or "").strip()
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return None
+
+
+def company_has_logo(settings: dict | None, company_id: int | None = None) -> bool:
+    if company_logo_url_from_settings(settings):
+        return True
+    cid = company_id if company_id is not None else (settings or {}).get("company_id")
+    if cid is not None:
+        try:
+            return company_static_logo_path(int(cid)).is_file()
+        except (TypeError, ValueError, OSError):
+            pass
+    return False
+
+
 def company_logo_file_uri(settings: dict | None) -> str | None:
+    url = company_logo_url_from_settings(settings)
+    if url:
+        return url
     if not settings:
         return None
     cid = settings.get("company_id")
@@ -1271,7 +1304,10 @@ def company_logo_file_uri(settings: dict | None) -> str | None:
 
 
 def company_logo_web_path(settings: dict | None) -> str | None:
-    """URL path under this app for logos inside the project (e.g. static/). file:// is not reliable in browsers."""
+    """Browser-safe logo URL (Cloudinary HTTPS or legacy static path)."""
+    url = company_logo_url_from_settings(settings)
+    if url:
+        return url
     if not settings:
         return None
     cid = settings.get("company_id")
@@ -1591,8 +1627,20 @@ def current_user(request: Request):
             user_dict["csrf_token"] = new_csrf
         try:
             cid_nav = int(user_dict["company_id"])
-            user_dict["has_company_logo"] = company_static_logo_path(cid_nav).is_file()
+            cursor.execute("SELECT logo_url FROM companies WHERE id=%s", (cid_nav,))
+            co_row = cursor.fetchone()
+            logo_url = str(co_row["logo_url"]).strip() if co_row and co_row.get("logo_url") else ""
+            if logo_url.startswith("http://") or logo_url.startswith("https://"):
+                user_dict["logo_url"] = logo_url
+            else:
+                user_dict["logo_url"] = None
+            local_path = company_static_logo_path(cid_nav)
+            local_href = f"/static/logos/company_{cid_nav}.png" if local_path.is_file() else None
+            user_dict["logo_display_url"] = user_dict.get("logo_url") or local_href
+            user_dict["has_company_logo"] = bool(user_dict.get("logo_display_url"))
         except (TypeError, ValueError, KeyError):
+            user_dict["logo_url"] = None
+            user_dict["logo_display_url"] = None
             user_dict["has_company_logo"] = False
         return user_dict
     
@@ -1678,7 +1726,10 @@ def get_company_settings(company_id: int) -> dict:
                 "terms_and_conditions",
             ):
                 out[fld] = (cod.get(fld) or "").strip() if cod.get(fld) is not None else ""
+            logo_url = str(cod.get("logo_url") or "").strip()
+            out["logo_url"] = logo_url if logo_url.startswith(("http://", "https://")) else ""
         out.setdefault("quote_footer", "")
+        out.setdefault("logo_url", "")
         out.setdefault("vat_percent", 15.0)
         out.setdefault("vat_enabled", 0)
         out.setdefault("default_discount_percent", 0.0)
@@ -1692,6 +1743,7 @@ def get_company_settings(company_id: int) -> dict:
             "terms_and_conditions",
         ):
             out.setdefault(fld, "")
+        out["logo_display_url"] = company_logo_web_path(out)
         return out
     
     
@@ -2255,12 +2307,9 @@ def invoice_financials_from_row(inv: dict, line_items: list[dict]) -> dict[str, 
     }
 
 
-def pdf_company_logo_flowable(company_id: int) -> RLImage | None:
-    path = company_static_logo_path(company_id)
-    if not path.is_file():
-        return None
+def _pdf_logo_flowable_from_image_source(source: object) -> RLImage | None:
     try:
-        ir = ImageReader(str(path))
+        ir = ImageReader(source)
         iw, ih = ir.getSize()
         if iw <= 0 or ih <= 0:
             return None
@@ -2269,14 +2318,73 @@ def pdf_company_logo_flowable(company_id: int) -> RLImage | None:
         scale = min(max_w_pt / float(iw), max_h_pt / float(ih), 1.0)
         dw = iw * scale
         dh = ih * scale
-        return RLImage(str(path), width=dw, height=dh)
+        return RLImage(source, width=dw, height=dh)
     except Exception:
-        logger.exception("Could not load company logo for PDF company_id=%s", company_id)
         return None
 
 
+def pdf_company_logo_flowable(company_id: int) -> RLImage | None:
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cursor.execute("SELECT logo_url FROM companies WHERE id=%s", (company_id,))
+            row = cursor.fetchone()
+        logo_url = str(row["logo_url"]).strip() if row and row.get("logo_url") else ""
+        if logo_url.startswith(("http://", "https://")):
+            try:
+                resp = requests.get(logo_url, timeout=15)
+                resp.raise_for_status()
+                buf = BytesIO(resp.content)
+                flow = _pdf_logo_flowable_from_image_source(buf)
+                if flow:
+                    return flow
+            except Exception:
+                logger.exception("Could not fetch Cloudinary logo for PDF company_id=%s", company_id)
+        path = company_static_logo_path(company_id)
+        if path.is_file():
+            return _pdf_logo_flowable_from_image_source(str(path))
+    except Exception:
+        logger.exception("Could not load company logo for PDF company_id=%s", company_id)
+    return None
+
+
+def _company_logo_png_buffer(raw: bytes) -> BytesIO | None:
+    try:
+        from PIL import Image
+
+        img = Image.open(BytesIO(raw))
+        img = img.convert("RGBA")
+        try:
+            resample = Image.Resampling.LANCZOS
+        except AttributeError:
+            resample = Image.LANCZOS
+        img.thumbnail((300, 300), resample)
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
+
+def _save_company_logo_local_file(company_id: int, png_buf: BytesIO) -> None:
+    (BASE_DIR / "static" / "logos").mkdir(parents=True, exist_ok=True)
+    dest = company_static_logo_path(company_id)
+    with open(dest, "wb") as f:
+        f.write(png_buf.getvalue())
+
+
+def _delete_company_logo_local_file(company_id: int) -> None:
+    try:
+        path = company_static_logo_path(company_id)
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        pass
+
+
 def save_company_logo_upload(company_id: int, upload: UploadFile | None) -> str | None:
-    """Save uploaded logo as static/logos/company_{id}.png. Returns error message or None."""
+    """Upload logo to Cloudinary when configured; otherwise save locally. Returns error message or None."""
     if upload is None or not getattr(upload, "filename", None):
         return None
     fn = str(upload.filename or "")
@@ -2289,19 +2397,42 @@ def save_company_logo_upload(company_id: int, upload: UploadFile | None) -> str 
     raw = upload.file.read()
     if len(raw) > 5 * 1024 * 1024:
         return "Logo file is too large"
-    (BASE_DIR / "static" / "logos").mkdir(parents=True, exist_ok=True)
-    try:
-        from PIL import Image
-
-        img = Image.open(BytesIO(raw))
-        img = img.convert("RGBA")
+    png_buf = _company_logo_png_buffer(raw)
+    if png_buf is None:
+        return "Could not process logo image"
+    if cloudinary_configured():
         try:
-            resample = Image.Resampling.LANCZOS
-        except AttributeError:
-            resample = Image.LANCZOS
-        img.thumbnail((300, 300), resample)
-        dest = company_static_logo_path(company_id)
-        img.save(dest, "PNG")
+            import cloudinary
+            import cloudinary.uploader
+
+            png_buf.seek(0)
+            cloudinary.config(
+                cloud_name=os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip(),
+                api_key=os.environ.get("CLOUDINARY_API_KEY", "").strip(),
+                api_secret=os.environ.get("CLOUDINARY_API_SECRET", "").strip(),
+                secure=True,
+            )
+            result = cloudinary.uploader.upload(
+                png_buf,
+                folder="geargridsa/logos",
+                public_id=f"company_{company_id}",
+                overwrite=True,
+                resource_type="image",
+                format="png",
+            )
+            logo_url = str(result.get("secure_url") or result.get("url") or "").strip()
+            if not logo_url:
+                return "Cloudinary did not return a logo URL"
+            with get_db() as conn:
+                cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cursor.execute("UPDATE companies SET logo_url=%s WHERE id=%s", (logo_url, company_id))
+            _delete_company_logo_local_file(company_id)
+            return None
+        except Exception:
+            logger.exception("Logo upload failed company_id=%s", company_id)
+            return "Could not upload logo image"
+    try:
+        _save_company_logo_local_file(company_id, png_buf)
     except Exception:
         logger.exception("Logo save failed company_id=%s", company_id)
         return "Could not process logo image"
@@ -2690,7 +2821,7 @@ def settings_page(request: Request):
     if response:
         return response
     settings = get_company_settings(user["company_id"])
-    has_logo = company_static_logo_path(user["company_id"]).is_file()
+    has_logo = company_has_logo(settings, user["company_id"])
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
@@ -2698,6 +2829,7 @@ def settings_page(request: Request):
             "title": "Company Settings",
             "settings": settings,
             "has_logo": has_logo,
+            "logo_url": settings.get("logo_display_url"),
             "company_id": user["company_id"],
             "current_user": user,
             "equipment_categories": list_equipment_categories(user["company_id"]),

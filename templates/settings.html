@@ -41,9 +41,9 @@
 
   <label>Company logo (JPG or PNG)</label><br>
   <input type="file" name="logo" accept="image/jpeg,image/png,.jpg,.jpeg,.png"><br>
-  {% if has_logo %}
+  {% if settings.get('logo_display_url') %}
   <p class="meta" style="margin-top:8px">Current logo:</p>
-  <p><img src="/static/logos/company_{{ company_id }}.png" alt="Company logo" style="max-height:80px;width:auto"></p>
+  <p><img src="{{ settings['logo_display_url'] }}" alt="Company logo" style="max-height:80px;width:auto"></p>
   {% endif %}
   <br>
 

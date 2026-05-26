@@ -12,9 +12,9 @@
   <header class="site-header">
     <div class="header-top">
       <div class="header-brand">
-        {% if current_user.get("has_company_logo") %}
+        {% if current_user.get("logo_display_url") %}
         <div style="display:flex;align-items:center;gap:10px;width:100%;min-width:0;">
-          <img src="/static/logos/company_{{ current_user['company_id'] }}.png" alt="" style="max-height:35px;width:auto;flex-shrink:0;align-self:center;">
+          <img src="{{ current_user['logo_display_url'] }}" alt="" style="max-height:35px;width:auto;flex-shrink:0;align-self:center;">
           <span class="company-name">{{ current_user["company_name"] or current_user["company_record_name"] }}</span>
         </div>
         {% else %}
