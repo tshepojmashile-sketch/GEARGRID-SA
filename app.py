@@ -501,7 +501,9 @@ def init_db() -> None:
         cursor.execute("UPDATE equipment SET quantity=1 WHERE quantity IS NULL OR quantity < 1")
         cursor.execute("UPDATE equipment SET quantity_rented=0 WHERE quantity_rented IS NULL")
         cursor.execute("UPDATE equipment SET quantity_rented=1 WHERE status='rented' AND quantity_rented=0")
-        cursor.execute("UPDATE equipment SET quantity = GREATEST(quantity, quantity_rented) WHERE quantity < quantity_rented")
+        cursor.execute(
+            "UPDATE equipment SET quantity = GREATEST(quantity::integer, quantity_rented::integer) WHERE quantity < quantity_rented"
+        )
 
         cursor.execute(
             """
@@ -1021,7 +1023,7 @@ def release_job_stock(cursor: object, company_id: int, job_id: int) -> None:
         if not eid:
             continue
         cursor.execute(
-            "UPDATE equipment SET quantity_rented = GREATEST(0, COALESCE(quantity_rented,0) - %s) WHERE id=%s AND company_id=%s",
+            "UPDATE equipment SET quantity_rented = GREATEST(0::integer, (COALESCE(quantity_rented, 0) - %s)::integer) WHERE id=%s AND company_id=%s",
             (qty, eid, company_id),
         )
         sync_equipment_row(cursor, eid, company_id)
@@ -1107,7 +1109,7 @@ def restore_sub_rental_stock_after_job_done(cursor: object, company_id: int, job
         cursor.execute(
             """
             UPDATE sub_rentals
-            SET quantity_available = MIN(quantity_total, quantity_available + %s)
+            SET quantity_available = LEAST(quantity_total::integer, (quantity_available + %s)::integer)
             WHERE id=%s AND company_id=%s
             """,
             (u, sid, company_id),
@@ -4813,7 +4815,7 @@ async def return_item_submit(request: Request, item_id: int, units: int = Form(.
                 return RedirectResponse(url=f"/return/{item_id}?error=Not%20enough%20units%20available", status_code=303)
             apply_rental_return_units(cursor, user["company_id"], equipment["name"], units)
             cursor.execute(
-                "UPDATE equipment SET quantity_rented = GREATEST(0, COALESCE(quantity_rented,0) - %s) WHERE id=%s AND company_id=%s",
+                "UPDATE equipment SET quantity_rented = GREATEST(0::integer, (COALESCE(quantity_rented, 0) - %s)::integer) WHERE id=%s AND company_id=%s",
                 (units, item_id, user["company_id"]),
             )
             sync_equipment_row(cursor, item_id, user["company_id"])
